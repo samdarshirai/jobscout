@@ -1,0 +1,26 @@
+# Secrets
+.env*
+!.env.example
+
+# Local candidate data — everything except the demo fixtures (DESIGN §2, §19)
+data/*
+!data/example/
+
+# SQLite
+*.sqlite
+*.sqlite3
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# SDD scratch (superpowers subagent-driven-development)
+.superpowers/
+
+# IDE / OS
+.idea/
+.DS_Store

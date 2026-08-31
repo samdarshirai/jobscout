@@ -3,6 +3,8 @@
 import sqlite3
 from pathlib import Path
 
+from langgraph.checkpoint.sqlite import SqliteSaver
+
 DEFAULT_DB_PATH = Path("data/jobscout.sqlite")
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 SCHEMA_VERSION = 1
@@ -29,3 +31,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text())
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
+
+
+def get_checkpointer(conn: sqlite3.Connection) -> SqliteSaver:
+    """A SqliteSaver bound to the same connection as the app tables.
+
+    Its checkpoint* tables land in the one file alongside app_* (DESIGN §11).
+    """
+    saver = SqliteSaver(conn)
+    saver.setup()
+    return saver

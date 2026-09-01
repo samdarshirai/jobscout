@@ -3,6 +3,13 @@
 -- Columns are minimal for now — later units ALTER TABLE to add fields
 -- (DESIGN §11: "finalised in code"). Bump PRAGMA user_version + add migration
 -- handling in db.init_db when that starts.
+-- LangGraph also creates an unprefixed `writes` table — do not name an app
+-- table `writes`. Our collision protection is the `app_` prefix, not theirs.
+-- All timestamps are UTC (SQLite `datetime('now')`); surfaces must convert.
+
+-- Durability posture: WAL lets a reader (a CLI poll) run without being blocked
+-- by a writer (jobscout serve) in the same file. Persistent once set.
+PRAGMA journal_mode = WAL;
 
 -- CONTEXT: Posting — one job listing from one company.
 CREATE TABLE IF NOT EXISTS app_posting (

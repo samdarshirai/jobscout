@@ -27,7 +27,15 @@ def get_connection(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Apply schema.sql and stamp the schema version. Idempotent."""
+    """Apply schema.sql and stamp the schema version. Idempotent for a
+    matching or fresh DB; raises on a DB written by a different schema version
+    (migration is a later unit's job — see module notes).
+    """
+    (found,) = conn.execute("PRAGMA user_version").fetchone()
+    if found not in (0, SCHEMA_VERSION):
+        raise RuntimeError(
+            f"DB is schema v{found}, code expects v{SCHEMA_VERSION}; migrate first"
+        )
     conn.executescript(SCHEMA_PATH.read_text())
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
@@ -37,6 +45,14 @@ def get_checkpointer(conn: sqlite3.Connection) -> SqliteSaver:
     """A SqliteSaver bound to the same connection as the app tables.
 
     Its checkpoint* tables land in the one file alongside app_* (DESIGN §11).
+
+    Call this ONCE per process and share the result. Each SqliteSaver has its
+    own lock; two savers on one connection do not mutually exclude, so their
+    commits can interleave with each other and with pending app-level writes.
+    The Core Service Layer (unit 3) owns the single connection + single
+    checkpointer for the process lifetime. Corollary: with a shared connection
+    there are no meaningful multi-statement transactions — keep app writes
+    single-statement and idempotent.
     """
     saver = SqliteSaver(conn)
     saver.setup()

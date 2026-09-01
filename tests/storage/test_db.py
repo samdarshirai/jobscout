@@ -88,3 +88,22 @@ def test_row_factory_is_sqlite3_row(tmp_path):
     row = conn.execute("SELECT company FROM app_posting WHERE id='p1'").fetchone()
     assert row["company"] == "ACME"
     conn.close()
+
+
+def test_data_and_user_version_survive_reconnect(tmp_path):
+    db_path = tmp_path / "j.sqlite"
+    conn1 = get_connection(db_path)
+    init_db(conn1)
+    conn1.execute(
+        "INSERT INTO app_posting (id, source, company, title) "
+        "VALUES ('p1', 'arbeitnow', 'ACME', 'Frontend Engineer')"
+    )
+    conn1.commit()
+    conn1.close()
+
+    conn2 = get_connection(db_path)
+    (v,) = conn2.execute("PRAGMA user_version").fetchone()
+    assert v == SCHEMA_VERSION
+    row = conn2.execute("SELECT company FROM app_posting WHERE id='p1'").fetchone()
+    assert row["company"] == "ACME"
+    conn2.close()

@@ -63,6 +63,11 @@ Acceptance criteria:
   objects (§12).
 - Built now, not stubbed for later refactor (§12) — later units extend this layer, never
   bypass it.
+- The layer owns **exactly one** `sqlite3` connection and **exactly one** `get_checkpointer`
+  result for the process lifetime, and hands them out (from Unit 2 final review: multiple
+  `SqliteSaver` instances on one connection have independent locks and can interleave
+  commits). Corollary: app writes stay single-statement and idempotent — a shared
+  connection has no meaningful multi-statement transactions.
 
 ### 4. Model access is one OpenRouter client with provider routing locked
 

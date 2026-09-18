@@ -96,7 +96,11 @@ def _with_hash(posting: dict) -> dict:
 def _compile(build_fn, tmp_path):
     conn = get_connection(tmp_path / "j.sqlite")
     init_db(conn)
-    graph = build_fn(conn).compile(checkpointer=get_checkpointer(conn))
+    # Separate connection for the checkpointer (see get_checkpointer's
+    # docstring) — sharing one with app-level writes is what produced the
+    # intermittent "cannot commit - no transaction is active" flake.
+    checkpointer_conn = get_connection(tmp_path / "j.sqlite")
+    graph = build_fn(conn).compile(checkpointer=get_checkpointer(checkpointer_conn))
     return graph, conn
 
 

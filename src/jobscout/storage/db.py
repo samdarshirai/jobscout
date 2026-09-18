@@ -13,10 +13,11 @@ SCHEMA_VERSION = 4  # bumped for app_score.content_hash (build-plan unit 20)
 def get_connection(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """A configured connection: foreign keys on, Row factory, parent dir created.
 
-    check_same_thread=False because LangGraph's checkpointer may touch the
-    connection from a worker thread. ponytail: one shared connection is fine
-    for a single long-running process; move to a pool or the async saver if
-    real concurrency shows up.
+    check_same_thread=False because LangGraph's own executor may touch a
+    connection from a worker thread. This alone does NOT make one
+    connection object safe to share across threads — CoreService opens
+    a separate connection per role (app tables vs. the checkpointer) for
+    exactly that reason; see get_checkpointer's docstring.
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,17 +43,20 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def get_checkpointer(conn: sqlite3.Connection) -> SqliteSaver:
-    """A SqliteSaver bound to the same connection as the app tables.
+    """A SqliteSaver bound to its OWN connection, not the app tables' one.
 
-    Its checkpoint* tables land in the one file alongside app_* (DESIGN §11).
+    Its checkpoint* tables land in the same file alongside app_* (DESIGN
+    §11), but on a separate `sqlite3.Connection` object — pass this a
+    connection nothing else writes through. LangGraph's own executor can
+    run a graph node's body and a checkpoint write on different threads
+    within one invoke(); two writers sharing one connection OBJECT is
+    unsafe even with check_same_thread=False (confirmed: intermittent
+    "cannot commit - no transaction is active" when app code and the
+    checkpointer shared a connection). Two separate connections to the
+    same file is fine — that's what WAL mode (schema.sql) is for.
 
-    Call this ONCE per process and share the result. Each SqliteSaver has its
-    own lock; two savers on one connection do not mutually exclude, so their
-    commits can interleave with each other and with pending app-level writes.
-    The Core Service Layer (unit 3) owns the single connection + single
-    checkpointer for the process lifetime. Corollary: with a shared connection
-    there are no meaningful multi-statement transactions — keep app writes
-    single-statement and idempotent.
+    Call this ONCE per process and share the result — the SqliteSaver
+    itself still isn't meant to be handed a second one.
     """
     saver = SqliteSaver(conn)
     saver.setup()

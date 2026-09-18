@@ -78,10 +78,21 @@ class CoreService:
         init_db(self._conn)
         self._criteria_path = criteria_path or DEFAULT_CRITERIA_PATH
         self._companies_path = companies_path or DEFAULT_COMPANIES_PATH
-        # ponytail: one connection + one checkpointer for the whole process.
-        # Single-process app; move to a pool / async saver only if real
-        # concurrency shows up (Unit 2 final review).
-        self._checkpointer = get_checkpointer(self._conn)
+        # The checkpointer gets its OWN connection to the same file, not
+        # self._conn. LangGraph's own executor can run a node body and a
+        # checkpoint write on different threads within one invoke(), and
+        # sharing one sqlite3.Connection object across threads is unsafe
+        # even with check_same_thread=False — that flag only disables
+        # Python's guard, it doesn't make concurrent access to one
+        # connection object safe. Confirmed: intermittent "cannot commit -
+        # no transaction is active" under repeated runs before this split.
+        # WAL mode (schema.sql) already anticipated more than one
+        # connection to this file ("a reader can run without being blocked
+        # by a writer") — this is that escape hatch, not a new one (Unit 2
+        # final review already flagged "move to a pool... if real
+        # concurrency shows up"; LangGraph's own executor is that).
+        self._checkpointer_conn = get_connection(db_path)
+        self._checkpointer = get_checkpointer(self._checkpointer_conn)
         self._poll = build_poll_graph(self._conn, self._companies_path).compile(
             checkpointer=self._checkpointer
         )
@@ -331,6 +342,7 @@ class CoreService:
     # ---- lifecycle --------------------------------------------------
     def close(self) -> None:
         self._conn.close()
+        self._checkpointer_conn.close()
 
     # ---- internals ------------------------------------------------
     def _handle(self, graph, run_id: str) -> RunHandle:

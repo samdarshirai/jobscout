@@ -635,7 +635,7 @@ def test_reset_onboarding_tags_pre_reset_and_clears_the_thread(tmp_path, monkeyp
     svc.close()
 
 
-def test_one_connection_and_one_checkpointer_for_the_service(tmp_path, monkeypatch):
+def test_one_checkpointer_on_its_own_connection_for_the_service(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "jobscout.graph.onboard.parse_profile",
         lambda resume_text: ExtractedProfile(
@@ -651,7 +651,12 @@ def test_one_connection_and_one_checkpointer_for_the_service(tmp_path, monkeypat
     svc.run_onboarding(str(FIXTURE))
     assert svc._poll.checkpointer is svc._checkpointer
     assert svc._onboard.checkpointer is svc._checkpointer
-    assert svc._checkpointer.conn is svc._conn
+    # The checkpointer's connection is deliberately NOT svc._conn — sharing
+    # one connection object across LangGraph's own worker threads and
+    # app-level writes is what caused an intermittent
+    # "cannot commit - no transaction is active" (see db.py's docstrings).
+    assert svc._checkpointer.conn is svc._checkpointer_conn
+    assert svc._checkpointer_conn is not svc._conn
     svc.close()
 
 

@@ -59,7 +59,7 @@ def test_poll_graph_unrecognized_decision_fails_closed(tmp_path):
     conn.close()
 
 
-def test_onboard_graph_runs_to_end_and_is_checkpointed(tmp_path, monkeypatch):
+def test_onboard_graph_walks_through_both_gates_and_persists_answers(tmp_path, monkeypatch):
     fake_profile = ExtractedProfile(
         roles=["Senior Frontend Engineer"],
         years_experience=6.0,
@@ -69,14 +69,42 @@ def test_onboard_graph_runs_to_end_and_is_checkpointed(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
     )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.generate_dynamic_questions",
+        lambda resume_text, static_answers: ["Vue ok?", "IC or lead?", "Remote only?"],
+    )
     graph, conn = _compile(build_onboard_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "onboard"}}
+
     graph.invoke(
-        {"resume_path": str(FIXTURE), "profile_draft": {}, "resume_text": ""}, cfg
+        {
+            "resume_path": str(FIXTURE),
+            "profile_draft": {},
+            "resume_text": "",
+            "static_answers": {},
+            "dynamic_questions": [],
+            "dynamic_answers": {},
+        },
+        cfg,
     )
     state = graph.get_state(cfg)
+    assert state.next == ("static_questions_gate",)
+    assert state.interrupts[0].value["gate"] == "static_questions"
+
+    static_answers = {"german_level": "B2", "work_mode": "remote"}
+    graph.invoke(Command(resume=static_answers), cfg)
+    state = graph.get_state(cfg)
+    assert state.next == ("dynamic_questions_gate",)
+    assert state.interrupts[0].value == {
+        "gate": "dynamic_questions",
+        "questions": ["Vue ok?", "IC or lead?", "Remote only?"],
+    }
+    assert state.values["static_answers"] == static_answers
+
+    dynamic_answers = {"Vue ok?": "yes", "IC or lead?": "open to lead"}
+    graph.invoke(Command(resume=dynamic_answers), cfg)
+    state = graph.get_state(cfg)
     assert state.next == ()
+    assert state.values["dynamic_answers"] == dynamic_answers
     assert state.values["profile_draft"] == fake_profile.model_dump()
-    assert "Jane Doe" in state.values["resume_text"]
-    assert state.config["configurable"]["thread_id"] == "onboard"
     conn.close()

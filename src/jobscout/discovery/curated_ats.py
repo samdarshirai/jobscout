@@ -47,49 +47,54 @@ def _cache_ats_type(conn: sqlite3.Connection, slug: str, ats_type: str) -> None:
 def _discover_company(
     conn: sqlite3.Connection, client: httpx.Client, company: TargetCompany
 ) -> list[dict]:
-    ats_type = _cached_ats_type(conn, company.slug)
-    if ats_type is None:
-        detected = detect_and_fetch(client, company.slug)
-        ats_type = detected[0] if detected else "none"
-        _cache_ats_type(conn, company.slug, ats_type)
-        raw_jobs = detected[1] if detected else []
-    elif ats_type == "none":
-        raw_jobs = []
-    else:
-        raw_jobs = fetch_from_known_ats(client, ats_type, company.slug)
+    try:
+        ats_type = _cached_ats_type(conn, company.slug)
+        if ats_type is None:
+            detected = detect_and_fetch(client, company.slug)
+            ats_type = detected[0] if detected else "none"
+            _cache_ats_type(conn, company.slug, ats_type)
+            raw_jobs = detected[1] if detected else []
+        elif ats_type == "none":
+            raw_jobs = []
+        else:
+            raw_jobs = fetch_from_known_ats(client, ats_type, company.slug)
 
-    if ats_type == "none":
-        if not company.careers_url:
-            return []
-        posting = fetch_careers_page_posting(client, company.careers_url)
-        if posting is None:
-            return []
-        source = f"careers:{company.name}"
+        if ats_type == "none":
+            if not company.careers_url:
+                return []
+            posting = fetch_careers_page_posting(client, company.careers_url)
+            if posting is None:
+                return []
+            source = f"careers:{company.name}"
+            return [
+                {
+                    "id": _dedupe_id(
+                        source, company.slug, None, posting["title"], posting["city"]
+                    ),
+                    "source": source,
+                    "company": company.name,
+                    "title": posting["title"],
+                    "city": posting["city"],
+                    "url": posting["url"],
+                    "jd_text": posting["jd_text"],
+                }
+            ]
+
+        source = f"ats:{company.name}"
         return [
             {
-                "id": _dedupe_id(source, company.slug, None, posting["title"], posting["city"]),
+                "id": _dedupe_id(source, company.slug, j["external_id"], j["title"], j["city"]),
                 "source": source,
                 "company": company.name,
-                "title": posting["title"],
-                "city": posting["city"],
-                "url": posting["url"],
-                "jd_text": posting["jd_text"],
+                "title": j["title"],
+                "city": j["city"],
+                "url": j["url"],
+                "jd_text": j["jd_text"],
             }
+            for j in raw_jobs
         ]
-
-    source = f"ats:{company.name}"
-    return [
-        {
-            "id": _dedupe_id(source, company.slug, j["external_id"], j["title"], j["city"]),
-            "source": source,
-            "company": company.name,
-            "title": j["title"],
-            "city": j["city"],
-            "url": j["url"],
-            "jd_text": j["jd_text"],
-        }
-        for j in raw_jobs
-    ]
+    except httpx.HTTPError:
+        return []  # §17: one unreachable company never blocks the Poll
 
 
 def discover_curated_ats(

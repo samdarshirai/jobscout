@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import httpx
-import pytest
 
 from jobscout.discovery.curated_ats import discover_curated_ats
 from jobscout.storage.db import get_connection, init_db
@@ -153,4 +152,24 @@ def test_discover_curated_ats_with_no_companies_returns_empty(tmp_path):
     path = _companies_file(tmp_path, "companies: []\n")
     postings = discover_curated_ats(conn, path)
     assert postings == []
+    conn.close()
+
+
+def test_discover_curated_ats_skips_company_on_transport_error(tmp_path):
+    """§17: one unreachable company never blocks the Poll, and its ATS
+    type is NOT cached — re-probing next poll is correct behavior."""
+    conn = _conn(tmp_path)
+    path = _companies_file(tmp_path, "companies:\n  - name: Acme GmbH\n    slug: acme\n")
+
+    def handler(request):
+        raise httpx.ConnectError("DNS lookup failed", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    postings = discover_curated_ats(conn, path, client)
+
+    assert postings == []
+    cached = conn.execute(
+        "SELECT ats_type FROM app_company_ats WHERE company_slug = 'acme'"
+    ).fetchone()
+    assert cached is None
     conn.close()

@@ -7,6 +7,7 @@ deterministic and the cache (owned by `jobscout.discovery.curated_ats`)
 is stable.
 """
 
+import html
 from xml.etree import ElementTree
 
 import httpx
@@ -28,7 +29,7 @@ def _fetch_greenhouse(client: httpx.Client, slug: str) -> list[dict] | None:
                 "title": j["title"],
                 "city": (j.get("location") or {}).get("name"),
                 "url": j.get("absolute_url"),
-                "jd_text": j.get("content", ""),
+                "jd_text": html.unescape(j.get("content", "")),
             }
             for j in resp.json().get("jobs", [])
         ]
@@ -87,14 +88,18 @@ def _fetch_personio(client: httpx.Client, slug: str) -> list[dict] | None:
         return None
     jobs = []
     for position in root.findall("position"):
+        external_id = position.findtext("id")
+        title = position.findtext("name")
+        if external_id is None or title is None:
+            continue
         description = " ".join(
             (d.findtext("value") or "").strip()
             for d in position.findall("./jobDescriptions/jobDescription")
         )
         jobs.append(
             {
-                "external_id": position.findtext("id"),
-                "title": position.findtext("name"),
+                "external_id": external_id,
+                "title": title,
                 "city": position.findtext("office"),
                 "url": position.findtext("careerSiteUrl"),
                 "jd_text": description,

@@ -1,5 +1,4 @@
 import httpx
-import pytest
 
 from jobscout.discovery.ats import detect_and_fetch, fetch_from_known_ats
 
@@ -184,6 +183,55 @@ def test_ashby_returns_none_on_malformed_json():
 
     result = detect_and_fetch(_client(handler), "acme")
     assert result is None
+
+
+def test_greenhouse_unescapes_double_escaped_html_entities_in_content():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "jobs": [
+                    {
+                        "id": 1,
+                        "title": "Senior Frontend Engineer",
+                        "location": {"name": "Berlin"},
+                        "content": "&lt;p&gt;Do things&lt;/p&gt;",
+                        "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+                    }
+                ]
+            },
+        )
+
+    ats_type, jobs = detect_and_fetch(_client(handler), "acme")
+
+    assert ats_type == "greenhouse"
+    assert jobs[0]["jd_text"] == "<p>Do things</p>"
+
+
+def test_personio_skips_position_missing_required_field():
+    xml = (
+        "<workzag-jobs>"
+        "<position>"
+        "<id>42</id><name>Data Engineer</name><office>Munich</office>"
+        "<careerSiteUrl>https://acme.jobs.personio.de/job/42</careerSiteUrl>"
+        "</position>"
+        "<position>"
+        "<id>43</id><office>Berlin</office>"
+        "</position>"
+        "</workzag-jobs>"
+    )
+
+    def handler(request):
+        if "personio" in request.url.host:
+            return httpx.Response(200, text=xml)
+        return httpx.Response(404)
+
+    ats_type, jobs = detect_and_fetch(_client(handler), "acme")
+
+    assert ats_type == "personio"
+    assert len(jobs) == 1
+    assert jobs[0]["external_id"] == "42"
+    assert jobs[0]["title"] == "Data Engineer"
 
 
 def test_greenhouse_returns_none_on_missing_required_field():

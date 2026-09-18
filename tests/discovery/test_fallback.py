@@ -46,3 +46,28 @@ def test_fetch_careers_page_posting_returns_none_on_404():
         _client(lambda request: httpx.Response(404)), "https://acme.example/careers"
     )
     assert result is None
+
+
+def test_fetch_careers_page_posting_follows_redirects(monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.discovery.fallback.trafilatura.extract",
+        lambda downloaded: "We are hiring engineers in Berlin.",
+    )
+
+    def handler(request):
+        if request.url == httpx.URL("https://acme.example/careers"):
+            return httpx.Response(
+                301, headers={"Location": "https://www.acme.example/careers"}
+            )
+        assert request.url == httpx.URL("https://www.acme.example/careers")
+        return httpx.Response(200, text="<html><body>hiring</body></html>")
+
+    result = fetch_careers_page_posting(_client(handler), "https://acme.example/careers")
+
+    assert result == {
+        "external_id": None,
+        "title": "Careers page",
+        "city": None,
+        "url": "https://acme.example/careers",
+        "jd_text": "We are hiring engineers in Berlin.",
+    }

@@ -22,4 +22,6 @@ def load_companies(path: Path = DEFAULT_COMPANIES_PATH) -> list[TargetCompany]:
     if not path.exists():
         return []
     data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping with a 'companies:' key")
     return [TargetCompany(**c) for c in data.get("companies") or []]

@@ -8,7 +8,7 @@ import trafilatura
 
 
 def fetch_careers_page_posting(client: httpx.Client, careers_url: str) -> dict | None:
-    resp = client.get(careers_url)
+    resp = client.get(careers_url, follow_redirects=True)
     if resp.status_code != 200:
         return None
     text = trafilatura.extract(resp.text)

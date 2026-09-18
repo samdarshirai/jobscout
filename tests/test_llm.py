@@ -48,3 +48,14 @@ def test_get_llm_raises_without_api_key(monkeypatch):
 
     with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         get_llm()
+
+
+def test_get_llm_empty_env_var_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "")
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "")
+
+    llm = get_llm()
+
+    assert llm.model_name == DEFAULT_MODEL
+    assert llm.openai_api_base == DEFAULT_BASE_URL

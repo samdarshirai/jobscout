@@ -3,6 +3,9 @@
 The one place an LLM client is built. Provider routing denies training /
 data-collecting providers on every call (DESIGN §2, §13). No LLM call
 happens in this module — the first real call is unit 8's `plan_search`.
+The `data_collection: deny` guarantee requires `OPENROUTER_BASE_URL` to point
+at OpenRouter; repointing it elsewhere (e.g., for local testing) makes that
+field meaningless, and DESIGN §2's data-handling promise stops applying.
 """
 
 import os
@@ -27,8 +30,8 @@ def get_llm(model: str | None = None) -> ChatOpenAI:
             "OPENROUTER_API_KEY is not set — see .env.example"
         )
     return ChatOpenAI(
-        model=model or os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL),
+        model=model or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL,
         api_key=api_key,
-        base_url=os.environ.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL),
+        base_url=os.environ.get("OPENROUTER_BASE_URL") or DEFAULT_BASE_URL,
         extra_body={"provider": {"data_collection": "deny"}},
     )

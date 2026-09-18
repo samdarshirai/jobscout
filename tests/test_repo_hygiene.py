@@ -21,6 +21,10 @@ def test_example_data_stays_tracked():
     assert not _is_ignored("data/example/fake_resume.pdf"), "data/example/ must not be ignored (DESIGN §19)"
 
 
+def test_companies_yaml_stays_tracked():
+    assert not _is_ignored("companies.yaml"), "companies.yaml must be tracked (DESIGN §3)"
+
+
 def test_env_example_lists_every_secret():
     text = Path(".env.example").read_text()
     for key in [

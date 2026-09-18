@@ -1,0 +1,5 @@
+# Target Companies (CONTEXT.md) — hand-curated, ~20-30 companies the
+# candidate would actually work for (DESIGN §3). ATS type is
+# auto-detected from `slug`, cached, not listed here. `careers_url` is
+# only used as the `trafilatura` fallback when no ATS is detected.
+companies: []

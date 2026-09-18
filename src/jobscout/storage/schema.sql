@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS app_posting (
     last_seen_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- CONTEXT: Curated ATS Board — auto-detected ATS type per Target
+-- Company, cached so it's probed at most once (§3).
+CREATE TABLE IF NOT EXISTS app_company_ats (
+    company_slug  TEXT PRIMARY KEY,
+    ats_type      TEXT NOT NULL,  -- greenhouse | lever | ashby | personio | none
+    detected_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- CONTEXT: Score / Rationale / Matched Lines — Score Sub-Agent output (§6).
 CREATE TABLE IF NOT EXISTS app_score (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,

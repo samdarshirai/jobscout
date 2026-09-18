@@ -18,6 +18,7 @@ APP_TABLES = {
     "app_profile",
     "app_preference_summary",
     "app_criteria",
+    "app_company_ats",
 }
 
 
@@ -42,7 +43,7 @@ def test_get_connection_enables_foreign_keys(tmp_path):
     conn.close()
 
 
-def test_init_db_creates_exactly_the_nine_app_tables(tmp_path):
+def test_init_db_creates_exactly_the_ten_app_tables(tmp_path):
     conn = get_connection(tmp_path / "j.sqlite")
     init_db(conn)
     names = _table_names(conn)

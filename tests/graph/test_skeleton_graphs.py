@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 from langgraph.types import Command
@@ -86,6 +87,12 @@ _CROSS_SOURCE_POSTINGS = [
 ]
 
 
+def _with_hash(posting: dict) -> dict:
+    """fetch_jd stamps content_hash (build-plan unit 20) on every Posting
+    with jd_text — expected fixtures need it too for exact-dict equality."""
+    return {**posting, "content_hash": hashlib.sha256(posting["jd_text"].encode()).hexdigest()}
+
+
 def _compile(build_fn, tmp_path):
     conn = get_connection(tmp_path / "j.sqlite")
     init_db(conn)
@@ -126,7 +133,7 @@ def test_poll_graph_approve_runs_discover_then_ends(tmp_path, monkeypatch):
     state = graph.get_state(cfg)
     assert state.next == ()
     assert state.values["decision"] == "approve"
-    assert state.values["postings"] == _FAKE_POSTINGS
+    assert state.values["postings"] == [_with_hash(p) for p in _FAKE_POSTINGS]
     conn.close()
 
 
@@ -140,7 +147,7 @@ def test_poll_graph_dedupes_same_id_within_one_batch(tmp_path, monkeypatch):
     graph.invoke(POLL_INIT, cfg)
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
-    assert state.values["postings"] == [_DUPLICATE_POSTINGS[0]]
+    assert state.values["postings"] == [_with_hash(_DUPLICATE_POSTINGS[0])]
     conn.close()
 
 
@@ -154,7 +161,7 @@ def test_poll_graph_drops_postings_with_no_jd_text(tmp_path, monkeypatch):
     graph.invoke(POLL_INIT, cfg)
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
-    assert state.values["postings"] == [_MIXED_JD_POSTINGS[0]]
+    assert state.values["postings"] == [_with_hash(_MIXED_JD_POSTINGS[0])]
     conn.close()
 
 
@@ -171,7 +178,7 @@ def test_poll_graph_collapses_a_cross_source_duplicate_when_tie_break_says_same(
     graph.invoke(POLL_INIT, cfg)
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
-    assert state.values["postings"] == [_CROSS_SOURCE_POSTINGS[0]]
+    assert state.values["postings"] == [_with_hash(_CROSS_SOURCE_POSTINGS[0])]
     conn.close()
 
 
@@ -188,7 +195,7 @@ def test_poll_graph_keeps_a_cross_source_pair_when_tie_break_says_not_same(
     graph.invoke(POLL_INIT, cfg)
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
-    assert state.values["postings"] == _CROSS_SOURCE_POSTINGS
+    assert state.values["postings"] == [_with_hash(p) for p in _CROSS_SOURCE_POSTINGS]
     conn.close()
 
 
@@ -291,7 +298,7 @@ def test_poll_graph_keeps_a_posting_passing_every_knockout(tmp_path, monkeypatch
     graph.invoke(init, cfg)
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
-    assert state.values["postings"] == _FAKE_POSTINGS
+    assert state.values["postings"] == [_with_hash(p) for p in _FAKE_POSTINGS]
     conn.close()
 
 

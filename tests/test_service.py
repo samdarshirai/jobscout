@@ -408,6 +408,31 @@ def test_get_queue_shows_only_the_latest_score_for_a_rescored_posting(tmp_path):
     svc.close()
 
 
+def test_get_queue_flags_changed_for_a_posting_scored_more_than_once(tmp_path):
+    svc = _svc(tmp_path)
+    _seed_posting_and_score(svc, "p1", "Acme", "Backend Engineer", 40, run_id="r1")
+    svc._conn.execute(
+        "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json) "
+        "VALUES ('p1', 'r2', 85, 'improved', '[]')"
+    )
+    svc._conn.commit()
+
+    [entry] = svc.get_queue()
+
+    assert entry.changed is True
+    svc.close()
+
+
+def test_get_queue_does_not_flag_changed_for_a_posting_scored_once(tmp_path):
+    svc = _svc(tmp_path)
+    _seed_posting_and_score(svc, "p1", "Acme", "Backend Engineer", 40)
+
+    [entry] = svc.get_queue()
+
+    assert entry.changed is False
+    svc.close()
+
+
 def test_run_onboarding_pauses_at_the_static_questions_gate(tmp_path, monkeypatch):
     fake_profile = ExtractedProfile(
         roles=["Senior Frontend Engineer"],

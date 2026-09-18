@@ -5,6 +5,7 @@ staleness -> knockout -> score -> finish. Unit 13's Queue is a
 service-layer read of persisted status/score, not a new graph node.
 """
 
+import hashlib
 import sqlite3
 from pathlib import Path
 from typing import TypedDict
@@ -52,8 +53,15 @@ def fetch_jd(state: PollState) -> dict:
     ponytail: Curated ATS Sources (unit 9) already return full JD text
     inline — this is a filter, not a fetch, until units 21-22 add
     summary-only Sources (Adzuna/arbeitnow) that need a real HTTP call
-    added here."""
-    return {"postings": [p for p in state["postings"] if p.get("jd_text")]}
+    added here. Stamps content_hash here too (DESIGN §11) — the score
+    node uses a changed hash to decide a Posting needs re-scoring."""
+    postings = []
+    for p in state["postings"]:
+        if not p.get("jd_text"):
+            continue
+        content_hash = hashlib.sha256(p["jd_text"].encode()).hexdigest()
+        postings.append({**p, "content_hash": content_hash})
+    return {"postings": postings}
 
 
 def finish(state: PollState) -> dict:

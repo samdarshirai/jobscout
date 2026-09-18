@@ -52,6 +52,7 @@ class QueueEntry:
     url: str | None
     score: int
     weak_fit: bool  # score < 50 (§6: Weak-Fit Flag)
+    changed: bool  # scored more than once — the JD changed since first seen (§11 unit 20)
     rationale: str
     dimensions: list[dict]
 
@@ -242,14 +243,16 @@ class CoreService:
         # consecutive-miss streak resets — this is also how a Posting that
         # went briefly stale un-stales on reappearing (§11).
         for p in postings:
-            row = {"status": "new", "status_reason": None, **p}
+            row = {"status": "new", "status_reason": None, "content_hash": None, **p}
             self._conn.execute(
                 "INSERT INTO app_posting "
-                "(id, source, company, title, city, url, jd_text, status, status_reason, missed_polls) "
-                "VALUES (:id, :source, :company, :title, :city, :url, :jd_text, :status, :status_reason, 0) "
+                "(id, source, company, title, city, url, jd_text, status, status_reason, "
+                "missed_polls, content_hash) "
+                "VALUES (:id, :source, :company, :title, :city, :url, :jd_text, :status, "
+                ":status_reason, 0, :content_hash) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "last_seen_at = datetime('now'), status = :status, status_reason = :status_reason, "
-                "missed_polls = 0",
+                "missed_polls = 0, content_hash = :content_hash",
                 row,
             )
         self._conn.commit()
@@ -261,8 +264,8 @@ class CoreService:
                 continue
             self._conn.execute(
                 "INSERT INTO app_score "
-                "(posting_id, run_id, score, rationale, dimensions_json, criteria_version) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(posting_id, run_id, score, rationale, dimensions_json, criteria_version, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     p["id"],
                     run_id,
@@ -270,6 +273,7 @@ class CoreService:
                     p["rationale"],
                     json.dumps(p["dimensions"]),
                     p.get("criteria_version"),
+                    p.get("content_hash"),
                 ),
             )
         self._conn.commit()
@@ -279,10 +283,14 @@ class CoreService:
         """Every Posting passing its Knockouts, sorted by Score (§6). A
         Posting the Knockout node excluded never got a Score, so the join
         alone leaves it out — nothing here is ever auto-dropped, and a
-        rescored Posting shows only its latest Score, not one row per Run."""
+        rescored Posting shows only its latest Score, not one row per Run.
+        `changed` flags a Posting scored more than once — a proxy for "the
+        JD changed since she first saw it" (§11 unit 20); there's no
+        separate "when did she look at this" tracking in this data model."""
         rows = self._conn.execute(
             "SELECT p.id, p.company, p.title, p.city, p.url, "
-            "s.score, s.rationale, s.dimensions_json "
+            "s.score, s.rationale, s.dimensions_json, "
+            "(SELECT COUNT(*) FROM app_score WHERE posting_id = p.id) AS score_count "
             "FROM app_posting p "
             "JOIN app_score s ON s.id = "
             "  (SELECT MAX(id) FROM app_score WHERE posting_id = p.id) "
@@ -297,6 +305,7 @@ class CoreService:
                 url=r["url"],
                 score=r["score"],
                 weak_fit=r["score"] < 50,
+                changed=r["score_count"] > 1,
                 rationale=r["rationale"],
                 dimensions=json.loads(r["dimensions_json"]) if r["dimensions_json"] else [],
             )

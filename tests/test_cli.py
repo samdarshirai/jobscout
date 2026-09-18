@@ -117,6 +117,7 @@ def test_queue_shows_postings(monkeypatch, tmp_path):
             url="https://x",
             score=72,
             weak_fit=False,
+            changed=False,
             rationale="why",
             dimensions=[],
         )

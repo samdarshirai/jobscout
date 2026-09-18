@@ -97,3 +97,81 @@ def test_score_postings_skips_excluded_postings_without_calling_the_agent(tmp_pa
 def test_score_postings_is_a_noop_with_no_scored_dimensions():
     postings = [{"id": "p1", "jd_text": "JD"}]
     assert score_postings(postings, {}, conn=None) == postings
+
+
+def test_score_postings_scores_a_never_scored_posting_and_records_its_hash(tmp_path, monkeypatch):
+    import sqlite3
+
+    from jobscout.storage.db import init_db
+
+    monkeypatch.setattr(
+        "jobscout.score.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 80,
+            "rationale": "great fit",
+            "dimensions": [],
+            "content_hash": posting.get("content_hash"),
+        },
+    )
+    conn = sqlite3.connect(tmp_path / "j.sqlite")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    postings = [{"id": "p1", "jd_text": "JD", "content_hash": "hash-v1"}]
+    [result] = score_postings(postings, {"scored": _SCORED}, conn, tmp_path / "companies.yaml")
+    assert result["status"] == "scored"
+    assert result["score"] == 80
+    assert result["content_hash"] == "hash-v1"
+    conn.close()
+
+
+def test_score_postings_skips_a_posting_whose_content_hash_is_unchanged(tmp_path, monkeypatch):
+    import sqlite3
+
+    from jobscout.storage.db import init_db
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("score_posting should not be called for an unchanged Posting")
+
+    monkeypatch.setattr("jobscout.score.score_posting", _boom)
+    conn = sqlite3.connect(tmp_path / "j.sqlite")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO app_score (posting_id, score, rationale, dimensions_json, content_hash) "
+        "VALUES ('p1', 70, 'ok', '[]', 'hash-v1')"
+    )
+    conn.commit()
+    postings = [{"id": "p1", "jd_text": "JD", "content_hash": "hash-v1"}]
+    [result] = score_postings(postings, {"scored": _SCORED}, conn, tmp_path / "companies.yaml")
+    assert result["status"] == "scored"
+    assert "score" not in result
+    conn.close()
+
+
+def test_score_postings_rescores_a_posting_whose_content_hash_changed(tmp_path, monkeypatch):
+    import sqlite3
+
+    from jobscout.storage.db import init_db
+
+    monkeypatch.setattr(
+        "jobscout.score.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 90,
+            "rationale": "even better now",
+            "dimensions": [],
+            "content_hash": posting.get("content_hash"),
+        },
+    )
+    conn = sqlite3.connect(tmp_path / "j.sqlite")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO app_score (posting_id, score, rationale, dimensions_json, content_hash) "
+        "VALUES ('p1', 70, 'ok', '[]', 'hash-v1')"
+    )
+    conn.commit()
+    postings = [{"id": "p1", "jd_text": "JD edited", "content_hash": "hash-v2"}]
+    [result] = score_postings(postings, {"scored": _SCORED}, conn, tmp_path / "companies.yaml")
+    assert result["score"] == 90
+    assert result["content_hash"] == "hash-v2"
+    conn.close()

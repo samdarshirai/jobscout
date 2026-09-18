@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS app_score (
     rationale         TEXT,
     dimensions_json   TEXT,             -- per Scored Dimension: 0-5 + quoted JD line + quoted resume line (§6)
     criteria_version  INTEGER,          -- app_criteria.version scored against
+    content_hash      TEXT,             -- the Posting's content_hash when this Score was computed (§11 unit 20)
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

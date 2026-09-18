@@ -63,6 +63,14 @@ def _latest_criteria_version(conn: sqlite3.Connection) -> int | None:
     return row["v"] if row else None
 
 
+def _latest_score_content_hash(conn: sqlite3.Connection, posting_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT content_hash FROM app_score WHERE posting_id = ? ORDER BY id DESC LIMIT 1",
+        (posting_id,),
+    ).fetchone()
+    return row["content_hash"] if row else None
+
+
 def _company_lookup_text(companies: list[TargetCompany], company: str) -> str:
     match = next((c for c in companies if c.name == company), None)
     if match is None:
@@ -169,6 +177,7 @@ def score_posting(
         "score": weighted_total(dims, scored),
         "rationale": result.rationale,
         "dimensions": [d.model_dump() for d in dims],
+        "content_hash": posting.get("content_hash"),
     }
 
 
@@ -179,7 +188,9 @@ def score_postings(
     companies_path: Path = DEFAULT_COMPANIES_PATH,
 ) -> list[dict]:
     """Score every Posting not already excluded by a Knockout (§6, §11);
-    an excluded Posting passes through untouched — no Score (§6)."""
+    an excluded Posting passes through untouched — no Score (§6). A
+    Posting whose content_hash matches its latest Score is skipped —
+    unchanged since it was last scored, no LLM call (§11 unit 20)."""
     scored = criteria.get("scored", [])
     if not scored:
         return postings
@@ -191,6 +202,9 @@ def score_postings(
         if posting.get("status") == "excluded":
             updated.append(posting)
             continue
+        if posting.get("content_hash") == _latest_score_content_hash(conn, posting["id"]):
+            updated.append({**posting, "status": "scored"})
+            continue
         result = score_posting(posting, scored, resume_text, companies, conn)
         updated.append(
             {
@@ -200,6 +214,7 @@ def score_postings(
                 "rationale": result["rationale"],
                 "dimensions": result["dimensions"],
                 "criteria_version": criteria_version,
+                "content_hash": posting.get("content_hash"),
             }
         )
     return updated

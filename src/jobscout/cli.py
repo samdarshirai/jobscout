@@ -163,7 +163,8 @@ def queue() -> None:
     entries = get_service().get_queue()
     table = Table("Score", "Company", "Title", "Posting", "Flag")
     for e in entries:
-        table.add_row(str(e.score), e.company, e.title, e.posting_id, "weak fit" if e.weak_fit else "")
+        flags = ", ".join(f for f, on in [("weak fit", e.weak_fit), ("changed", e.changed)] if on)
+        table.add_row(str(e.score), e.company, e.title, e.posting_id, flags)
     console.print(table)
 
 

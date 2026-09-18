@@ -786,10 +786,7 @@ def test_discover_curated_ats_falls_back_to_trafilatura_when_no_ats_detected(
 
     assert postings == [
         {
-            "id": (
-                "careers:Acme GmbH:"
-                + __import__("hashlib").sha256(b"acme|careers page|").hexdigest()
-            ),
+            "id": __import__("hashlib").sha256(b"acme|careers page|").hexdigest(),
             "source": "careers:Acme GmbH",
             "company": "Acme GmbH",
             "title": "Careers page",
@@ -845,6 +842,7 @@ connection of its own — `conn` is a parameter, same shape as
 
 import hashlib
 import sqlite3
+from pathlib import Path
 
 import httpx
 
@@ -929,7 +927,7 @@ def _discover_company(
 
 def discover_curated_ats(
     conn: sqlite3.Connection,
-    companies_path: str = DEFAULT_COMPANIES_PATH,
+    companies_path: Path = DEFAULT_COMPANIES_PATH,
     client: httpx.Client | None = None,
 ) -> list[dict]:
     """All Target Companies' Postings for this Poll."""
@@ -1225,13 +1223,7 @@ Add near `_save_criteria`:
 
 - [ ] **Step 6: Update `tests/test_service.py`**
 
-Add the import and helper, and thread `companies_path` through `_svc`:
-
-```python
-from jobscout.discovery.curated_ats import discover_curated_ats  # noqa: F401 (patched by name below)
-```
-
-(Only needed if referenced directly; tests patch `"jobscout.graph.poll.discover_curated_ats"` by string, so this import isn't required — skip adding it if unused.)
+Thread `companies_path` through `_svc` (no new import needed — tests patch `jobscout.graph.poll.discover_curated_ats` by string path, never call it directly):
 
 ```python
 def _svc(tmp_path) -> CoreService:

@@ -18,6 +18,7 @@ from uuid import uuid4
 from langgraph.types import Command
 
 from jobscout.criteria import Criteria, DEFAULT_CRITERIA_PATH, read_criteria_file, write_criteria_file
+from jobscout import spend
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
@@ -83,12 +84,24 @@ class CoreService:
         self._poll = build_poll_graph(self._conn, self._companies_path).compile(
             checkpointer=self._checkpointer
         )
-        self._onboard = build_onboard_graph().compile(
+        self._onboard = build_onboard_graph(self._conn).compile(
             checkpointer=self._checkpointer
         )
 
+    def total_spend(self) -> float:
+        return spend.total_spend(self._conn)
+
+    def _check_spend_cap(self) -> None:
+        # Start-of-call guard only (§13): stops a *new* trigger/resume once
+        # over cap, doesn't interrupt a Run already mid-flight past it.
+        if self.total_spend() >= spend.CAP_USD:
+            raise spend.SpendCapExceeded(
+                f"spend cap (${spend.CAP_USD}) reached — no new Run until reviewed"
+            )
+
     # ---- runs ----------------------------------------------------------
     def trigger_run(self) -> RunHandle:
+        self._check_spend_cap()
         run_id = uuid4().hex
         cfg = {"configurable": {"thread_id": run_id}}
         init = dict(_POLL_INIT, criteria=self._latest_criteria_data())
@@ -96,6 +109,7 @@ class CoreService:
         return self._handle(self._poll, run_id)
 
     def resume_run(self, run_id: str, decision: object) -> RunHandle:
+        self._check_spend_cap()
         cfg = {"configurable": {"thread_id": run_id}}
         if not self._poll.get_state(cfg).created_at:
             raise ValueError(f"no such run: {run_id!r}")
@@ -108,6 +122,7 @@ class CoreService:
         return handle
 
     def run_onboarding(self, resume_path: str | None = None) -> RunHandle:
+        self._check_spend_cap()
         if not resume_path:
             raise ValueError("run_onboarding needs a resume PDF path")
         cfg = {"configurable": {"thread_id": _ONBOARD_THREAD}}
@@ -129,6 +144,7 @@ class CoreService:
         return handle
 
     def resume_onboarding(self, decision: object) -> RunHandle:
+        self._check_spend_cap()
         cfg = {"configurable": {"thread_id": _ONBOARD_THREAD}}
         snap = self._onboard.get_state(cfg)
         if not snap.created_at:

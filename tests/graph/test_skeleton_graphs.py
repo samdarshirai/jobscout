@@ -289,7 +289,7 @@ def test_onboard_graph_walks_through_both_gates_and_derives_criteria(tmp_path, m
     monkeypatch.setattr(
         "jobscout.graph.onboard.derive_criteria", lambda profile: fake_criteria
     )
-    graph, conn = _compile(lambda conn: build_onboard_graph(), tmp_path)
+    graph, conn = _compile(lambda conn: build_onboard_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "onboard"}}
 
     graph.invoke(

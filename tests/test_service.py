@@ -61,6 +61,41 @@ def test_trigger_run_requires_criteria(tmp_path):
     svc.close()
 
 
+def _blow_spend_cap(svc: CoreService) -> None:
+    svc._conn.execute(
+        "INSERT INTO app_spend (run_id, node, model, cost_usd) VALUES ('r0', 'score', 'm', 25.0)"
+    )
+    svc._conn.commit()
+
+
+def test_trigger_run_refuses_once_spend_cap_is_reached(tmp_path):
+    from jobscout.spend import SpendCapExceeded
+
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    _blow_spend_cap(svc)
+    with pytest.raises(SpendCapExceeded):
+        svc.trigger_run()
+    svc.close()
+
+
+def test_run_onboarding_refuses_once_spend_cap_is_reached(tmp_path):
+    from jobscout.spend import SpendCapExceeded
+
+    svc = _svc(tmp_path)
+    _blow_spend_cap(svc)
+    with pytest.raises(SpendCapExceeded):
+        svc.run_onboarding(str(FIXTURE))
+    svc.close()
+
+
+def test_total_spend_reflects_logged_rows(tmp_path):
+    svc = _svc(tmp_path)
+    _blow_spend_cap(svc)
+    assert svc.total_spend() == 25.0
+    svc.close()
+
+
 def test_resume_run_approve_completes(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN

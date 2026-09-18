@@ -9,9 +9,11 @@ import sqlite3
 from pathlib import Path
 from typing import TypedDict
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from jobscout import spend
 from jobscout.criteria import KnockoutRule
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.discovery.curated_ats import discover_curated_ats
@@ -25,13 +27,6 @@ class PollState(TypedDict):
     search_plan: dict
     decision: str
     postings: list
-
-
-def plan_search(state: PollState) -> dict:
-    # ponytail: no Spend logging yet (§13) — same reasoning as onboard's LLM
-    # nodes (units 5-7); the cap-enforcement machinery (unit 15) doesn't exist yet.
-    plan = derive_search_plan(state["criteria"])
-    return {"search_plan": plan.model_dump()}
 
 
 def search_plan_gate(state: PollState) -> dict:
@@ -71,24 +66,6 @@ def staleness(state: PollState) -> dict:
     return {}
 
 
-def knockout(state: PollState) -> dict:
-    """An LLM extracts the fact, a rule decides, per Knockout axis (§6).
-    A failing Posting gets status `excluded` + reason here but still flows
-    through this Run's `postings` list — unit 13's Queue is what filters
-    on `status` so an excluded Posting never lands there or gets a Score."""
-    rules = [KnockoutRule(**r) for r in state["criteria"].get("knockout", [])]
-    if not rules:
-        return {}
-    updated = []
-    for posting in state["postings"]:
-        facts = extract_knockout_facts(posting["jd_text"], rules)
-        reason = decide_knockout(facts)
-        if reason is not None:
-            posting = {**posting, "status": "excluded", "status_reason": reason}
-        updated.append(posting)
-    return {"postings": updated}
-
-
 def finish(state: PollState) -> dict:
     return {}
 
@@ -96,13 +73,49 @@ def finish(state: PollState) -> dict:
 def build_poll_graph(
     conn: sqlite3.Connection, companies_path: Path = DEFAULT_COMPANIES_PATH
 ) -> StateGraph:
+    def plan_search(state: PollState, config: RunnableConfig) -> dict:
+        run_id = config["configurable"]["thread_id"]
+        plan, rows = spend.run_and_track(derive_search_plan, state["criteria"])
+        spend.log_spend(conn, run_id, "plan_search", rows)
+        return {"search_plan": plan.model_dump()}
+
     def discover(state: PollState) -> dict:
         # ponytail: Curated ATS Boards only. Units 21-22 add Adzuna/arbeitnow.
         return {"postings": discover_curated_ats(conn, companies_path)}
 
-    def score(state: PollState) -> dict:
+    def knockout(state: PollState, config: RunnableConfig) -> dict:
+        """An LLM extracts the fact, a rule decides, per Knockout axis (§6).
+        A failing Posting gets status `excluded` + reason here but still
+        flows through this Run's `postings` list — unit 13's Queue is what
+        filters on `status` so an excluded Posting never lands there or
+        gets a Score."""
+        rules = [KnockoutRule(**r) for r in state["criteria"].get("knockout", [])]
+        if not rules:
+            return {}
+        run_id = config["configurable"]["thread_id"]
+
+        def _run_knockout() -> list[dict]:
+            updated = []
+            for posting in state["postings"]:
+                facts = extract_knockout_facts(posting["jd_text"], rules)
+                reason = decide_knockout(facts)
+                if reason is not None:
+                    posting = {**posting, "status": "excluded", "status_reason": reason}
+                updated.append(posting)
+            return updated
+
+        updated, rows = spend.run_and_track(_run_knockout)
+        spend.log_spend(conn, run_id, "knockout", rows)
+        return {"postings": updated}
+
+    def score(state: PollState, config: RunnableConfig) -> dict:
         """Score Sub-Agent (§4, §6) — skips Postings a Knockout excluded."""
-        return {"postings": score_postings(state["postings"], state["criteria"], conn, companies_path)}
+        run_id = config["configurable"]["thread_id"]
+        postings, rows = spend.run_and_track(
+            score_postings, state["postings"], state["criteria"], conn, companies_path
+        )
+        spend.log_spend(conn, run_id, "score", rows)
+        return {"postings": postings}
 
     g = StateGraph(PollState)
     g.add_node("plan_search", plan_search)

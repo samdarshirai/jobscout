@@ -74,7 +74,7 @@ def test_record_verdict_rejects_unknown_verdict(tmp_path):
     svc.close()
 
 
-def test_run_onboarding_completes(tmp_path, monkeypatch):
+def test_run_onboarding_pauses_at_the_static_questions_gate(tmp_path, monkeypatch):
     fake_profile = ExtractedProfile(
         roles=["Senior Frontend Engineer"],
         years_experience=6.0,
@@ -86,12 +86,12 @@ def test_run_onboarding_completes(tmp_path, monkeypatch):
     )
     svc = _svc(tmp_path)
     h = svc.run_onboarding(str(FIXTURE))
-    assert h.status == "completed"
-    assert h.state["profile_draft"] == fake_profile.model_dump()
+    assert h.status == "paused"
+    assert h.pending_gate["gate"] == "static_questions"
     svc.close()
 
 
-def test_run_onboarding_persists_one_versioned_profile_row(tmp_path, monkeypatch):
+def test_resume_onboarding_walks_to_the_dynamic_questions_gate(tmp_path, monkeypatch):
     fake_profile = ExtractedProfile(
         roles=["Senior Frontend Engineer"],
         years_experience=6.0,
@@ -101,15 +101,60 @@ def test_run_onboarding_persists_one_versioned_profile_row(tmp_path, monkeypatch
     monkeypatch.setattr(
         "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
     )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.generate_dynamic_questions",
+        lambda resume_text, static_answers: ["Vue ok?", "IC or lead?", "Remote only?"],
+    )
     svc = _svc(tmp_path)
     svc.run_onboarding(str(FIXTURE))
+    h = svc.resume_onboarding({"work_mode": "remote"})
+    assert h.status == "paused"
+    assert h.pending_gate == {
+        "gate": "dynamic_questions",
+        "questions": ["Vue ok?", "IC or lead?", "Remote only?"],
+    }
+    svc.close()
+
+
+def test_resume_onboarding_completes_and_persists_merged_profile(tmp_path, monkeypatch):
+    fake_profile = ExtractedProfile(
+        roles=["Senior Frontend Engineer"],
+        years_experience=6.0,
+        stack=["React"],
+        seniority_signals=["Led a team of 4 engineers"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.generate_dynamic_questions",
+        lambda resume_text, static_answers: ["Vue ok?"],
+    )
+    svc = _svc(tmp_path)
+    svc.run_onboarding(str(FIXTURE))
+    svc.resume_onboarding({"work_mode": "remote"})
+    h = svc.resume_onboarding({"Vue ok?": "yes"})
+
+    assert h.status == "completed"
+    assert h.state["static_answers"] == {"work_mode": "remote"}
+    assert h.state["dynamic_answers"] == {"Vue ok?": "yes"}
+
     rows = svc._conn.execute(
         "SELECT version, data_json, resume_text FROM app_profile"
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["version"] == 1
-    assert json.loads(rows[0]["data_json"]) == fake_profile.model_dump()
+    data = json.loads(rows[0]["data_json"])
+    assert data["resume"] == fake_profile.model_dump()
+    assert data["static_answers"] == {"work_mode": "remote"}
+    assert data["dynamic_answers"] == {"Vue ok?": "yes"}
     assert "Jane Doe" in rows[0]["resume_text"]
+    svc.close()
+
+
+def test_resume_onboarding_rejects_when_no_run_in_progress(tmp_path):
+    svc = _svc(tmp_path)
+    with pytest.raises(ValueError, match="no onboarding run"):
+        svc.resume_onboarding("anything")
     svc.close()
 
 

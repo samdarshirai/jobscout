@@ -80,9 +80,26 @@ class CoreService:
             raise ValueError("run_onboarding needs a resume PDF path")
         cfg = {"configurable": {"thread_id": _ONBOARD_THREAD}}
         self._onboard.invoke(
-            {"resume_path": resume_path, "profile_draft": {}, "resume_text": ""},
+            {
+                "resume_path": resume_path,
+                "profile_draft": {},
+                "resume_text": "",
+                "static_answers": {},
+                "dynamic_questions": [],
+                "dynamic_answers": {},
+            },
             cfg,
         )
+        handle = self._handle(self._onboard, _ONBOARD_THREAD)
+        if handle.status == "completed":
+            self._save_profile(handle.state)
+        return handle
+
+    def resume_onboarding(self, decision: object) -> RunHandle:
+        cfg = {"configurable": {"thread_id": _ONBOARD_THREAD}}
+        if not self._onboard.get_state(cfg).created_at:
+            raise ValueError("no onboarding run in progress")
+        self._onboard.invoke(Command(resume=decision), cfg)
         handle = self._handle(self._onboard, _ONBOARD_THREAD)
         if handle.status == "completed":
             self._save_profile(handle.state)
@@ -96,10 +113,15 @@ class CoreService:
         (version,) = self._conn.execute(
             "SELECT COALESCE(MAX(version), 0) + 1 FROM app_profile"
         ).fetchone()
+        data = {
+            "resume": state["profile_draft"],
+            "static_answers": state["static_answers"],
+            "dynamic_answers": state["dynamic_answers"],
+        }
         self._conn.execute(
             "INSERT INTO app_profile (version, data_json, resume_text) "
             "VALUES (?, ?, ?)",
-            (version, json.dumps(state["profile_draft"]), state["resume_text"]),
+            (version, json.dumps(data), state["resume_text"]),
         )
         self._conn.commit()
 

@@ -5,6 +5,7 @@ from langgraph.types import Command
 from jobscout.criteria import Criteria, KnockoutRule, ScoredDimension
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
+from jobscout.knockout import AxisFact, KnockoutFacts
 from jobscout.resume import ExtractedProfile
 from jobscout.search_plan import SearchPlan
 from jobscout.storage.db import get_checkpointer, get_connection, init_db
@@ -134,6 +135,46 @@ def test_poll_graph_drops_postings_with_no_jd_text(tmp_path, monkeypatch):
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
     assert state.values["postings"] == [_MIXED_JD_POSTINGS[0]]
+    conn.close()
+
+
+def test_poll_graph_excludes_a_posting_failing_a_knockout(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.graph.poll.extract_knockout_facts",
+        lambda jd_text, rules: KnockoutFacts(
+            axes=[AxisFact(axis="german_required", passes=False, evidence="C1 German required")]
+        ),
+    )
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r7"}}
+    init = {**POLL_INIT, "criteria": {"knockout": [{"axis": "german_required", "rule": "B2 max"}]}}
+    graph.invoke(init, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    [posting] = state.values["postings"]
+    assert posting["status"] == "excluded"
+    assert posting["status_reason"] == "german_required: C1 German required"
+    conn.close()
+
+
+def test_poll_graph_keeps_a_posting_passing_every_knockout(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.graph.poll.extract_knockout_facts",
+        lambda jd_text, rules: KnockoutFacts(
+            axes=[AxisFact(axis="german_required", passes=True, evidence="no German mentioned")]
+        ),
+    )
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r8"}}
+    init = {**POLL_INIT, "criteria": {"knockout": [{"axis": "german_required", "rule": "B2 max"}]}}
+    graph.invoke(init, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    assert state.values["postings"] == _FAKE_POSTINGS
     conn.close()
 
 

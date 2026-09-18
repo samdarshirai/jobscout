@@ -1,10 +1,9 @@
 """Poll graph (DESIGN §4).
 
-Real shape:  plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> score -> finish
-This unit:   plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> finish
+Real shape:  plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> knockout -> score -> finish
+This unit:   plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> knockout -> finish
 
-Unit 11 inserts knockout exclusion between `staleness` and `finish`;
-unit 12 adds the `score` sub-agent after that.
+Unit 12 adds the `score` sub-agent between `knockout` and `finish`.
 """
 
 import sqlite3
@@ -14,8 +13,10 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from jobscout.criteria import KnockoutRule
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.discovery.curated_ats import discover_curated_ats
+from jobscout.knockout import decide_knockout, extract_knockout_facts
 from jobscout.search_plan import derive_search_plan
 
 
@@ -70,8 +71,26 @@ def staleness(state: PollState) -> dict:
     return {}
 
 
+def knockout(state: PollState) -> dict:
+    """An LLM extracts the fact, a rule decides, per Knockout axis (§6).
+    A failing Posting gets status `excluded` + reason here but still flows
+    through this Run's `postings` list — unit 13's Queue is what filters
+    on `status` so an excluded Posting never lands there or gets a Score."""
+    rules = [KnockoutRule(**r) for r in state["criteria"].get("knockout", [])]
+    if not rules:
+        return {}
+    updated = []
+    for posting in state["postings"]:
+        facts = extract_knockout_facts(posting["jd_text"], rules)
+        reason = decide_knockout(facts)
+        if reason is not None:
+            posting = {**posting, "status": "excluded", "status_reason": reason}
+        updated.append(posting)
+    return {"postings": updated}
+
+
 def finish(state: PollState) -> dict:
-    # Unit 11+ insert knockout exclusion/queueing/scoring before this node.
+    # Unit 12+ insert scoring before this node.
     return {}
 
 
@@ -89,6 +108,7 @@ def build_poll_graph(
     g.add_node("dedupe", dedupe)
     g.add_node("fetch_jd", fetch_jd)
     g.add_node("staleness", staleness)
+    g.add_node("knockout", knockout)
     g.add_node("finish", finish)
     g.add_edge(START, "plan_search")
     g.add_edge("plan_search", "search_plan_gate")
@@ -98,6 +118,7 @@ def build_poll_graph(
     g.add_edge("discover", "dedupe")
     g.add_edge("dedupe", "fetch_jd")
     g.add_edge("fetch_jd", "staleness")
-    g.add_edge("staleness", "finish")
+    g.add_edge("staleness", "knockout")
+    g.add_edge("knockout", "finish")
     g.add_edge("finish", END)
     return g

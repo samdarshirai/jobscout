@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from jobscout.criteria import Criteria, KnockoutRule, ScoredDimension, write_criteria_file
+from jobscout.knockout import AxisFact, KnockoutFacts
 from jobscout.resume import ExtractedProfile
 from jobscout.search_plan import SearchPlan
 from jobscout.service import CoreService, RunHandle, get_service
@@ -104,6 +105,12 @@ def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
     )
+    monkeypatch.setattr(
+        "jobscout.graph.poll.extract_knockout_facts",
+        lambda jd_text, rules: KnockoutFacts(
+            axes=[AxisFact(axis="seniority_band", passes=True, evidence="Engineer")]
+        ),
+    )
     svc = _svc(tmp_path)
     _seed_criteria(svc)
     h = svc.trigger_run()
@@ -115,6 +122,42 @@ def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
     ).fetchone()
     assert row["company"] == "Acme"
     assert row["jd_text"] == "JD"
+    svc.close()
+
+
+def test_resume_run_approve_persists_a_knockout_exclusion(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
+    fake_posting = {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD",
+    }
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.poll.extract_knockout_facts",
+        lambda jd_text, rules: KnockoutFacts(
+            axes=[AxisFact(axis="seniority_band", passes=False, evidence="Junior role")]
+        ),
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    h = svc.trigger_run()
+    svc.resume_run(h.run_id, "approve")
+
+    row = svc._conn.execute(
+        "SELECT status, status_reason FROM app_posting WHERE id = ?",
+        (fake_posting["id"],),
+    ).fetchone()
+    assert row["status"] == "excluded"
+    assert row["status_reason"] == "seniority_band: Junior role"
     svc.close()
 
 

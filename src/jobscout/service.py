@@ -203,12 +203,17 @@ class CoreService:
         write_criteria_file(Criteria(**data), self._criteria_path)
 
     def _save_discovered_postings(self, postings: list[dict]) -> None:
+        # unit 11: a Posting failing a Knockout carries status="excluded" +
+        # status_reason (§6) — everything else defaults to "new" as before.
         for p in postings:
+            row = {"status": "new", "status_reason": None, **p}
             self._conn.execute(
-                "INSERT INTO app_posting (id, source, company, title, city, url, jd_text) "
-                "VALUES (:id, :source, :company, :title, :city, :url, :jd_text) "
-                "ON CONFLICT(id) DO UPDATE SET last_seen_at = datetime('now')",
-                p,
+                "INSERT INTO app_posting "
+                "(id, source, company, title, city, url, jd_text, status, status_reason) "
+                "VALUES (:id, :source, :company, :title, :city, :url, :jd_text, :status, :status_reason) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "last_seen_at = datetime('now'), status = :status, status_reason = :status_reason",
+                row,
             )
         self._conn.commit()
 

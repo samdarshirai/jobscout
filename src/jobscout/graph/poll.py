@@ -1,10 +1,10 @@
 """Poll graph (DESIGN §4).
 
 Real shape:  plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> score -> finish
-This unit:   plan_search --(gate)--> discover --> finish
+This unit:   plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> finish
 
-Unit 10 inserts dedupe/fetch_jd/staleness between `discover` and
-`finish`; unit 12 adds the `score` sub-agent after that.
+Unit 11 inserts knockout exclusion between `staleness` and `finish`;
+unit 12 adds the `score` sub-agent after that.
 """
 
 import sqlite3
@@ -46,8 +46,32 @@ def _after_gate(state: PollState) -> str:
     return "discover" if state["decision"] == "approve" else END
 
 
+def dedupe(state: PollState) -> dict:
+    """Exact-key dedupe only (DESIGN §11) — a same-id Posting discovered
+    twice in one batch collapses to its first occurrence. Cross-Source
+    fuzzy matching (same job, different id) is unit 17's cached LLM call."""
+    seen: dict[str, dict] = {}
+    for posting in state["postings"]:
+        seen.setdefault(posting["id"], posting)
+    return {"postings": list(seen.values())}
+
+
+def fetch_jd(state: PollState) -> dict:
+    """A Posting missing JD text does not reach scoring (DESIGN §4).
+    ponytail: Curated ATS Sources (unit 9) already return full JD text
+    inline — this is a filter, not a fetch, until units 21-22 add
+    summary-only Sources (Adzuna/arbeitnow) that need a real HTTP call
+    added here."""
+    return {"postings": [p for p in state["postings"] if p.get("jd_text")]}
+
+
+def staleness(state: PollState) -> dict:
+    """Pass-through placeholder — real logic is units 18-19."""
+    return {}
+
+
 def finish(state: PollState) -> dict:
-    # Units 11+ insert knockouts/queueing/scoring before this node.
+    # Unit 11+ insert knockout exclusion/queueing/scoring before this node.
     return {}
 
 
@@ -62,12 +86,18 @@ def build_poll_graph(
     g.add_node("plan_search", plan_search)
     g.add_node("search_plan_gate", search_plan_gate)
     g.add_node("discover", discover)
+    g.add_node("dedupe", dedupe)
+    g.add_node("fetch_jd", fetch_jd)
+    g.add_node("staleness", staleness)
     g.add_node("finish", finish)
     g.add_edge(START, "plan_search")
     g.add_edge("plan_search", "search_plan_gate")
     g.add_conditional_edges(
         "search_plan_gate", _after_gate, {"discover": "discover", END: END}
     )
-    g.add_edge("discover", "finish")
+    g.add_edge("discover", "dedupe")
+    g.add_edge("dedupe", "fetch_jd")
+    g.add_edge("fetch_jd", "staleness")
+    g.add_edge("staleness", "finish")
     g.add_edge("finish", END)
     return g

@@ -23,6 +23,46 @@ _FAKE_POSTINGS = [
         "jd_text": "JD",
     }
 ]
+_DUPLICATE_POSTINGS = [
+    {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD",
+    },
+    {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer (dupe)",
+        "city": "Berlin",
+        "url": "https://example.com/1-dupe",
+        "jd_text": "JD (dupe copy)",
+    },
+]
+_MIXED_JD_POSTINGS = [
+    {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Has JD",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD",
+    },
+    {
+        "id": "ats:Acme:acme:2",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Missing JD",
+        "city": "Berlin",
+        "url": "https://example.com/2",
+        "jd_text": "",
+    },
+]
 
 
 def _compile(build_fn, tmp_path):
@@ -66,6 +106,34 @@ def test_poll_graph_approve_runs_discover_then_ends(tmp_path, monkeypatch):
     assert state.next == ()
     assert state.values["decision"] == "approve"
     assert state.values["postings"] == _FAKE_POSTINGS
+    conn.close()
+
+
+def test_poll_graph_dedupes_same_id_within_one_batch(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _DUPLICATE_POSTINGS
+    )
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r5"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    assert state.values["postings"] == [_DUPLICATE_POSTINGS[0]]
+    conn.close()
+
+
+def test_poll_graph_drops_postings_with_no_jd_text(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _MIXED_JD_POSTINGS
+    )
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r6"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    assert state.values["postings"] == [_MIXED_JD_POSTINGS[0]]
     conn.close()
 
 

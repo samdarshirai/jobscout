@@ -2,6 +2,7 @@ from pathlib import Path
 
 from langgraph.types import Command
 
+from jobscout.criteria import Criteria, KnockoutRule, ScoredDimension
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
 from jobscout.resume import ExtractedProfile
@@ -59,12 +60,22 @@ def test_poll_graph_unrecognized_decision_fails_closed(tmp_path):
     conn.close()
 
 
-def test_onboard_graph_walks_through_both_gates_and_persists_answers(tmp_path, monkeypatch):
+def test_onboard_graph_walks_through_both_gates_and_derives_criteria(tmp_path, monkeypatch):
     fake_profile = ExtractedProfile(
         roles=["Senior Frontend Engineer"],
         years_experience=6.0,
         stack=["React", "TypeScript"],
         seniority_signals=["Led a team of 4 engineers"],
+    )
+    fake_criteria = Criteria(
+        knockout=[KnockoutRule(axis="seniority_band", rule="senior or mid only")],
+        scored=[
+            ScoredDimension(dimension="stack fit", weight=0.4, rubric="5 = 3+ core tools"),
+            ScoredDimension(dimension="domain/product interest", weight=0.2, rubric="soft"),
+            ScoredDimension(dimension="scope & seniority signals", weight=0.2, rubric="own"),
+            ScoredDimension(dimension="eng-culture signals", weight=0.2, rubric="testing"),
+        ],
+        learn=[],
     )
     monkeypatch.setattr(
         "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
@@ -72,6 +83,9 @@ def test_onboard_graph_walks_through_both_gates_and_persists_answers(tmp_path, m
     monkeypatch.setattr(
         "jobscout.graph.onboard.generate_dynamic_questions",
         lambda resume_text, static_answers: ["Vue ok?", "IC or lead?", "Remote only?"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.derive_criteria", lambda profile: fake_criteria
     )
     graph, conn = _compile(build_onboard_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "onboard"}}
@@ -84,27 +98,24 @@ def test_onboard_graph_walks_through_both_gates_and_persists_answers(tmp_path, m
             "static_answers": {},
             "dynamic_questions": [],
             "dynamic_answers": {},
+            "criteria_draft": {},
         },
         cfg,
     )
     state = graph.get_state(cfg)
     assert state.next == ("static_questions_gate",)
-    assert state.interrupts[0].value["gate"] == "static_questions"
 
     static_answers = {"german_level": "B2", "work_mode": "remote"}
     graph.invoke(Command(resume=static_answers), cfg)
     state = graph.get_state(cfg)
     assert state.next == ("dynamic_questions_gate",)
-    assert state.interrupts[0].value == {
-        "gate": "dynamic_questions",
-        "questions": ["Vue ok?", "IC or lead?", "Remote only?"],
-    }
-    assert state.values["static_answers"] == static_answers
 
     dynamic_answers = {"Vue ok?": "yes", "IC or lead?": "open to lead"}
     graph.invoke(Command(resume=dynamic_answers), cfg)
     state = graph.get_state(cfg)
     assert state.next == ()
+    assert state.values["criteria_draft"] == fake_criteria.model_dump()
+    assert state.values["static_answers"] == static_answers
     assert state.values["dynamic_answers"] == dynamic_answers
     assert state.values["profile_draft"] == fake_profile.model_dump()
     conn.close()

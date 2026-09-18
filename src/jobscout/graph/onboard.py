@@ -1,7 +1,6 @@
-"""Onboard graph — resume ingest, static questions, dynamic questions (DESIGN §5).
+"""Onboard graph — resume ingest, static/dynamic questions, criteria (DESIGN §5).
 
 `onboard` is a checkpointed subgraph so each stage can pause and resume later.
-Unit 7 adds criteria derivation after this graph reaches END.
 """
 
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from jobscout.criteria import derive_criteria
 from jobscout.questions import STATIC_QUESTIONS, generate_dynamic_questions
 from jobscout.resume import extract_resume_text, parse_profile
 
@@ -21,6 +21,7 @@ class OnboardState(TypedDict):
     static_answers: dict
     dynamic_questions: list[str]
     dynamic_answers: dict
+    criteria_draft: dict
 
 
 def ingest(state: OnboardState) -> dict:
@@ -51,15 +52,28 @@ def dynamic_questions_gate(state: OnboardState) -> dict:
     return {"dynamic_answers": dict(answers)}
 
 
+def draft_criteria(state: OnboardState) -> dict:
+    # ponytail: no Spend logging yet (§13) — same reasoning as draft_dynamic_questions.
+    profile = {
+        "resume": state["profile_draft"],
+        "static_answers": state["static_answers"],
+        "dynamic_answers": state["dynamic_answers"],
+    }
+    criteria = derive_criteria(profile)
+    return {"criteria_draft": criteria.model_dump()}
+
+
 def build_onboard_graph() -> StateGraph:
     g = StateGraph(OnboardState)
     g.add_node("ingest", ingest)
     g.add_node("static_questions_gate", static_questions_gate)
     g.add_node("draft_dynamic_questions", draft_dynamic_questions)
     g.add_node("dynamic_questions_gate", dynamic_questions_gate)
+    g.add_node("draft_criteria", draft_criteria)
     g.add_edge(START, "ingest")
     g.add_edge("ingest", "static_questions_gate")
     g.add_edge("static_questions_gate", "draft_dynamic_questions")
     g.add_edge("draft_dynamic_questions", "dynamic_questions_gate")
-    g.add_edge("dynamic_questions_gate", END)
+    g.add_edge("dynamic_questions_gate", "draft_criteria")
+    g.add_edge("draft_criteria", END)
     return g

@@ -154,3 +154,61 @@ def test_fetch_from_known_ats_skips_probing_other_types():
 def test_fetch_from_known_ats_returns_empty_list_on_failure():
     jobs = fetch_from_known_ats(_client(lambda request: httpx.Response(500)), "greenhouse", "acme")
     assert jobs == []
+
+
+def test_greenhouse_returns_none_on_malformed_json():
+    def handler(request):
+        if "greenhouse" in request.url.host:
+            return httpx.Response(200, text="<html>maintenance</html>")
+        return httpx.Response(404)
+
+    result = detect_and_fetch(_client(handler), "acme")
+    assert result is None
+
+
+def test_lever_returns_none_on_malformed_json():
+    def handler(request):
+        if "lever" in request.url.host:
+            return httpx.Response(200, text="<html>maintenance</html>")
+        return httpx.Response(404)
+
+    result = detect_and_fetch(_client(handler), "acme")
+    assert result is None
+
+
+def test_ashby_returns_none_on_malformed_json():
+    def handler(request):
+        if "ashbyhq" in request.url.host:
+            return httpx.Response(200, text="<html>maintenance</html>")
+        return httpx.Response(404)
+
+    result = detect_and_fetch(_client(handler), "acme")
+    assert result is None
+
+
+def test_greenhouse_returns_none_on_missing_required_field():
+    def handler(request):
+        return httpx.Response(200, json={"jobs": [{"id": 1}]})
+
+    result = detect_and_fetch(_client(handler), "acme")
+    assert result is None
+
+
+def test_lever_returns_none_on_missing_required_field():
+    def handler(request):
+        if "lever" in request.url.host:
+            return httpx.Response(200, json=[{"id": "abc"}])
+        return httpx.Response(404)
+
+    result = detect_and_fetch(_client(handler), "acme")
+    assert result is None
+
+
+def test_ashby_returns_none_on_missing_required_field():
+    def handler(request):
+        if "ashbyhq" in request.url.host:
+            return httpx.Response(200, json={"jobs": [{"id": "xyz"}]})
+        return httpx.Response(404)
+
+    result = detect_and_fetch(_client(handler), "acme")
+    assert result is None

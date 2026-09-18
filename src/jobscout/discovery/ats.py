@@ -21,51 +21,60 @@ def _fetch_greenhouse(client: httpx.Client, slug: str) -> list[dict] | None:
     )
     if resp.status_code != 200:
         return None
-    return [
-        {
-            "external_id": str(j["id"]),
-            "title": j["title"],
-            "city": (j.get("location") or {}).get("name"),
-            "url": j.get("absolute_url"),
-            "jd_text": j.get("content", ""),
-        }
-        for j in resp.json().get("jobs", [])
-    ]
+    try:
+        return [
+            {
+                "external_id": str(j["id"]),
+                "title": j["title"],
+                "city": (j.get("location") or {}).get("name"),
+                "url": j.get("absolute_url"),
+                "jd_text": j.get("content", ""),
+            }
+            for j in resp.json().get("jobs", [])
+        ]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def _fetch_lever(client: httpx.Client, slug: str) -> list[dict] | None:
     resp = client.get(f"https://api.lever.co/v0/postings/{slug}", params={"mode": "json"})
     if resp.status_code != 200:
         return None
-    jobs = resp.json()
-    if not isinstance(jobs, list):
+    try:
+        jobs = resp.json()
+        if not isinstance(jobs, list):
+            return None
+        return [
+            {
+                "external_id": str(j["id"]),
+                "title": j["text"],
+                "city": (j.get("categories") or {}).get("location"),
+                "url": j.get("hostedUrl"),
+                "jd_text": j.get("descriptionPlain", ""),
+            }
+            for j in jobs
+        ]
+    except (ValueError, KeyError, TypeError, AttributeError):
         return None
-    return [
-        {
-            "external_id": str(j["id"]),
-            "title": j["text"],
-            "city": (j.get("categories") or {}).get("location"),
-            "url": j.get("hostedUrl"),
-            "jd_text": j.get("descriptionPlain", ""),
-        }
-        for j in jobs
-    ]
 
 
 def _fetch_ashby(client: httpx.Client, slug: str) -> list[dict] | None:
     resp = client.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")
     if resp.status_code != 200:
         return None
-    return [
-        {
-            "external_id": str(j["id"]),
-            "title": j["title"],
-            "city": j.get("location"),
-            "url": j.get("jobUrl"),
-            "jd_text": j.get("descriptionPlain", ""),
-        }
-        for j in resp.json().get("jobs", [])
-    ]
+    try:
+        return [
+            {
+                "external_id": str(j["id"]),
+                "title": j["title"],
+                "city": j.get("location"),
+                "url": j.get("jobUrl"),
+                "jd_text": j.get("descriptionPlain", ""),
+            }
+            for j in resp.json().get("jobs", [])
+        ]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def _fetch_personio(client: httpx.Client, slug: str) -> list[dict] | None:

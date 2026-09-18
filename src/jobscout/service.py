@@ -76,9 +76,11 @@ class CoreService:
         return self._handle(self._poll, run_id)
 
     def run_onboarding(self, resume_path: str | None = None) -> RunHandle:
+        if not resume_path:
+            raise ValueError("run_onboarding needs a resume PDF path")
         cfg = {"configurable": {"thread_id": _ONBOARD_THREAD}}
         self._onboard.invoke(
-            {"resume_path": resume_path or "", "profile_draft": {}, "resume_text": ""},
+            {"resume_path": resume_path, "profile_draft": {}, "resume_text": ""},
             cfg,
         )
         handle = self._handle(self._onboard, _ONBOARD_THREAD)

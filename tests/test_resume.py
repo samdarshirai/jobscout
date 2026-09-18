@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pypdf import PdfWriter
+
 from jobscout.resume import ExtractedProfile, extract_resume_text, parse_profile
 
 FIXTURE = Path(__file__).parent.parent / "data" / "example" / "fake_resume.pdf"
@@ -11,6 +14,17 @@ def test_extract_resume_text_reads_real_pdf_content():
     assert "Jane Doe" in text
     assert "React" in text
     assert "Led a team of 4 engineers" in text
+
+
+def test_extract_resume_text_rejects_a_pdf_with_no_text_layer(tmp_path):
+    blank_pdf = tmp_path / "blank.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    with open(blank_pdf, "wb") as f:
+        writer.write(f)
+
+    with pytest.raises(ValueError, match="extractable text"):
+        extract_resume_text(blank_pdf)
 
 
 def test_parse_profile_calls_structured_llm_with_resume_text(monkeypatch):

@@ -28,7 +28,12 @@ class ExtractedProfile(BaseModel):
 def extract_resume_text(pdf_path: Path) -> str:
     """Raw text of every page, joined with newlines."""
     reader = PdfReader(pdf_path)
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    if not text.strip():
+        raise ValueError(
+            f"no extractable text in {pdf_path} (scanned/image-only PDF?)"
+        )
+    return text
 
 
 _EXTRACTION_PROMPT = (

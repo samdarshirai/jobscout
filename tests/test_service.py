@@ -137,6 +137,13 @@ def test_public_surface_hands_back_no_graph_objects(tmp_path):
     svc.close()
 
 
+def test_run_onboarding_requires_a_resume_path(tmp_path):
+    svc = _svc(tmp_path)
+    with pytest.raises(ValueError, match="resume PDF path"):
+        svc.run_onboarding()
+    svc.close()
+
+
 def test_get_service_is_a_singleton_per_path(tmp_path):
     p = tmp_path / "j.sqlite"
     try:

@@ -1,23 +1,29 @@
-"""Onboard graph — skeleton (DESIGN §5).
+"""Onboard graph — resume ingest is real; later stages are units 6-7 (DESIGN §5).
 
 `onboard` is a checkpointed subgraph so it can stop halfway and resume.
-This unit is a single pass-through node. Units 5-7 replace `ingest` with
-resume-PDF extraction, static + dynamic questions, and criteria derivation.
+This unit's `ingest` does the real stage-1 work: PDF -> text -> structured
+Profile. Units 6-7 add static questions, dynamic questions, and criteria
+derivation as further nodes between `ingest` and `END`.
 """
 
+from pathlib import Path
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
+
+from jobscout.resume import extract_resume_text, parse_profile
 
 
 class OnboardState(TypedDict):
     resume_path: str
     profile_draft: dict
+    resume_text: str
 
 
 def ingest(state: OnboardState) -> dict:
-    # Units 5-7 replace this with the real onboarding stages.
-    return {"profile_draft": {"resume_path": state["resume_path"]}}
+    resume_text = extract_resume_text(Path(state["resume_path"]))
+    profile = parse_profile(resume_text)
+    return {"resume_text": resume_text, "profile_draft": profile.model_dump()}
 
 
 def build_onboard_graph() -> StateGraph:

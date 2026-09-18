@@ -1,6 +1,12 @@
+import json
+from pathlib import Path
+
 import pytest
 
+from jobscout.resume import ExtractedProfile
 from jobscout.service import CoreService, RunHandle, get_service
+
+FIXTURE = Path(__file__).parent.parent / "data" / "example" / "fake_resume.pdf"
 
 
 def _svc(tmp_path) -> CoreService:
@@ -68,18 +74,55 @@ def test_record_verdict_rejects_unknown_verdict(tmp_path):
     svc.close()
 
 
-def test_run_onboarding_completes(tmp_path):
+def test_run_onboarding_completes(tmp_path, monkeypatch):
+    fake_profile = ExtractedProfile(
+        roles=["Senior Frontend Engineer"],
+        years_experience=6.0,
+        stack=["React", "TypeScript", "GraphQL"],
+        seniority_signals=["Led a team of 4 engineers"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
+    )
     svc = _svc(tmp_path)
-    h = svc.run_onboarding("cv.pdf")
+    h = svc.run_onboarding(str(FIXTURE))
     assert h.status == "completed"
-    assert h.state["profile_draft"] == {"resume_path": "cv.pdf"}
+    assert h.state["profile_draft"] == fake_profile.model_dump()
     svc.close()
 
 
-def test_one_connection_and_one_checkpointer_for_the_service(tmp_path):
+def test_run_onboarding_persists_one_versioned_profile_row(tmp_path, monkeypatch):
+    fake_profile = ExtractedProfile(
+        roles=["Senior Frontend Engineer"],
+        years_experience=6.0,
+        stack=["React"],
+        seniority_signals=["Led a team of 4 engineers"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
+    )
+    svc = _svc(tmp_path)
+    svc.run_onboarding(str(FIXTURE))
+    rows = svc._conn.execute(
+        "SELECT version, data_json, resume_text FROM app_profile"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["version"] == 1
+    assert json.loads(rows[0]["data_json"]) == fake_profile.model_dump()
+    assert "Jane Doe" in rows[0]["resume_text"]
+    svc.close()
+
+
+def test_one_connection_and_one_checkpointer_for_the_service(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.parse_profile",
+        lambda resume_text: ExtractedProfile(
+            roles=[], years_experience=0.0, stack=[], seniority_signals=[]
+        ),
+    )
     svc = _svc(tmp_path)
     svc.trigger_run()
-    svc.run_onboarding()
+    svc.run_onboarding(str(FIXTURE))
     assert svc._poll.checkpointer is svc._checkpointer
     assert svc._onboard.checkpointer is svc._checkpointer
     assert svc._checkpointer.conn is svc._conn

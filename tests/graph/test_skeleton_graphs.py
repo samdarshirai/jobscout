@@ -1,10 +1,14 @@
+from pathlib import Path
+
 from langgraph.types import Command
 
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
+from jobscout.resume import ExtractedProfile
 from jobscout.storage.db import get_checkpointer, get_connection, init_db
 
 POLL_INIT = {"search_plan": {}, "decision": "", "postings": []}
+FIXTURE = Path(__file__).parent.parent.parent / "data" / "example" / "fake_resume.pdf"
 
 
 def _compile(builder, tmp_path):
@@ -55,12 +59,24 @@ def test_poll_graph_unrecognized_decision_fails_closed(tmp_path):
     conn.close()
 
 
-def test_onboard_graph_runs_to_end_and_is_checkpointed(tmp_path):
+def test_onboard_graph_runs_to_end_and_is_checkpointed(tmp_path, monkeypatch):
+    fake_profile = ExtractedProfile(
+        roles=["Senior Frontend Engineer"],
+        years_experience=6.0,
+        stack=["React", "TypeScript"],
+        seniority_signals=["Led a team of 4 engineers"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
+    )
     graph, conn = _compile(build_onboard_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "onboard"}}
-    graph.invoke({"resume_path": "cv.pdf", "profile_draft": {}}, cfg)
+    graph.invoke(
+        {"resume_path": str(FIXTURE), "profile_draft": {}, "resume_text": ""}, cfg
+    )
     state = graph.get_state(cfg)
     assert state.next == ()
-    assert state.values["profile_draft"] == {"resume_path": "cv.pdf"}
+    assert state.values["profile_draft"] == fake_profile.model_dump()
+    assert "Jane Doe" in state.values["resume_text"]
     assert state.config["configurable"]["thread_id"] == "onboard"
     conn.close()

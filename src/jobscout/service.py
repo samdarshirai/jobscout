@@ -8,6 +8,7 @@ This layer is permanent. The graph *nodes* it drives are skeletons that
 units 5-17 replace one at a time; the method signatures here do not change.
 """
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from functools import lru_cache
@@ -77,9 +78,28 @@ class CoreService:
     def run_onboarding(self, resume_path: str | None = None) -> RunHandle:
         cfg = {"configurable": {"thread_id": _ONBOARD_THREAD}}
         self._onboard.invoke(
-            {"resume_path": resume_path or "", "profile_draft": {}}, cfg
+            {"resume_path": resume_path or "", "profile_draft": {}, "resume_text": ""},
+            cfg,
         )
-        return self._handle(self._onboard, _ONBOARD_THREAD)
+        handle = self._handle(self._onboard, _ONBOARD_THREAD)
+        if handle.status == "completed":
+            self._save_profile(handle.state)
+        return handle
+
+    def _save_profile(self, state: dict) -> None:
+        # ponytail: version read-then-insert isn't race-safe under concurrent
+        # callers. Fine today — one CLI process, one command at a time. Add
+        # locking / a unique constraint retry if a concurrent surface
+        # (units 40-41) ever calls run_onboarding from more than one place.
+        (version,) = self._conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM app_profile"
+        ).fetchone()
+        self._conn.execute(
+            "INSERT INTO app_profile (version, data_json, resume_text) "
+            "VALUES (?, ?, ?)",
+            (version, json.dumps(state["profile_draft"]), state["resume_text"]),
+        )
+        self._conn.commit()
 
     # ---- verdict ------------------------------------------------------
     def record_verdict(

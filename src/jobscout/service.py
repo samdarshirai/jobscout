@@ -87,7 +87,9 @@ class CoreService:
         self._poll.invoke(Command(resume=decision), cfg)
         handle = self._handle(self._poll, run_id)
         if handle.status == "completed":
-            self._save_discovered_postings(handle.state.get("postings", []))
+            postings = handle.state.get("postings", [])
+            self._save_discovered_postings(postings)
+            self._save_scores(run_id, postings)
         return handle
 
     def run_onboarding(self, resume_path: str | None = None) -> RunHandle:
@@ -214,6 +216,26 @@ class CoreService:
                 "ON CONFLICT(id) DO UPDATE SET "
                 "last_seen_at = datetime('now'), status = :status, status_reason = :status_reason",
                 row,
+            )
+        self._conn.commit()
+
+    def _save_scores(self, run_id: str, postings: list[dict]) -> None:
+        # unit 12: a Posting the Score Sub-Agent scored carries a "score" key.
+        for p in postings:
+            if "score" not in p:
+                continue
+            self._conn.execute(
+                "INSERT INTO app_score "
+                "(posting_id, run_id, score, rationale, dimensions_json, criteria_version) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    p["id"],
+                    run_id,
+                    p["score"],
+                    p["rationale"],
+                    json.dumps(p["dimensions"]),
+                    p.get("criteria_version"),
+                ),
             )
         self._conn.commit()
 

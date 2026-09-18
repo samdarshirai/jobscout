@@ -111,6 +111,14 @@ def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
             axes=[AxisFact(axis="seniority_band", passes=True, evidence="Engineer")]
         ),
     )
+    monkeypatch.setattr(
+        "jobscout.score.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 80,
+            "rationale": "good fit",
+            "dimensions": [],
+        },
+    )
     svc = _svc(tmp_path)
     _seed_criteria(svc)
     h = svc.trigger_run()
@@ -122,6 +130,54 @@ def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
     ).fetchone()
     assert row["company"] == "Acme"
     assert row["jd_text"] == "JD"
+    svc.close()
+
+
+def test_resume_run_approve_persists_a_score(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
+    fake_posting = {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD",
+    }
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.poll.extract_knockout_facts",
+        lambda jd_text, rules: KnockoutFacts(
+            axes=[AxisFact(axis="seniority_band", passes=True, evidence="Engineer")]
+        ),
+    )
+    monkeypatch.setattr(
+        "jobscout.score.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 65,
+            "rationale": "decent stack fit",
+            "dimensions": [{"dimension": "stack fit", "score": 3}],
+        },
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    h = svc.trigger_run()
+    svc.resume_run(h.run_id, "approve")
+
+    row = svc._conn.execute(
+        "SELECT posting_id, run_id, score, rationale, dimensions_json, criteria_version "
+        "FROM app_score WHERE posting_id = ?",
+        (fake_posting["id"],),
+    ).fetchone()
+    assert row["run_id"] == h.run_id
+    assert row["score"] == 65
+    assert row["rationale"] == "decent stack fit"
+    assert json.loads(row["dimensions_json"]) == [{"dimension": "stack fit", "score": 3}]
+    assert row["criteria_version"] == 1
     svc.close()
 
 

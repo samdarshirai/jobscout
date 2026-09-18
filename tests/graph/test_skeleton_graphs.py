@@ -178,6 +178,65 @@ def test_poll_graph_keeps_a_posting_passing_every_knockout(tmp_path, monkeypatch
     conn.close()
 
 
+def test_poll_graph_scores_a_posting_passing_its_knockouts(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.score.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 72,
+            "rationale": "strong stack fit",
+            "dimensions": [],
+        },
+    )
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r10"}}
+    init = {
+        **POLL_INIT,
+        "criteria": {"scored": [{"dimension": "stack fit", "weight": 1.0, "rubric": "core tools"}]},
+    }
+    graph.invoke(init, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    [posting] = state.values["postings"]
+    assert posting["status"] == "scored"
+    assert posting["score"] == 72
+    assert posting["rationale"] == "strong stack fit"
+    conn.close()
+
+
+def test_poll_graph_never_scores_a_posting_excluded_by_a_knockout(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.graph.poll.extract_knockout_facts",
+        lambda jd_text, rules: KnockoutFacts(
+            axes=[AxisFact(axis="seniority_band", passes=False, evidence="junior role")]
+        ),
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("score_posting must not run on an excluded Posting")
+
+    monkeypatch.setattr("jobscout.score.score_posting", _boom)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r11"}}
+    init = {
+        **POLL_INIT,
+        "criteria": {
+            "knockout": [{"axis": "seniority_band", "rule": "senior only"}],
+            "scored": [{"dimension": "stack fit", "weight": 1.0, "rubric": "core tools"}],
+        },
+    }
+    graph.invoke(init, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    [posting] = state.values["postings"]
+    assert posting["status"] == "excluded"
+    assert "score" not in posting
+    conn.close()
+
+
 def test_poll_graph_reject_routes_straight_to_end(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
     graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)

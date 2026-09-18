@@ -1,9 +1,8 @@
 """Poll graph (DESIGN §4).
 
-Real shape:  plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> knockout -> score -> finish
-This unit:   plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> knockout -> finish
-
-Unit 12 adds the `score` sub-agent between `knockout` and `finish`.
+Full backbone: plan_search --(gate)--> discover -> dedupe -> fetch_jd ->
+staleness -> knockout -> score -> finish. Unit 13's Queue is a
+service-layer read of persisted status/score, not a new graph node.
 """
 
 import sqlite3
@@ -17,6 +16,7 @@ from jobscout.criteria import KnockoutRule
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.discovery.curated_ats import discover_curated_ats
 from jobscout.knockout import decide_knockout, extract_knockout_facts
+from jobscout.score import score_postings
 from jobscout.search_plan import derive_search_plan
 
 
@@ -90,7 +90,6 @@ def knockout(state: PollState) -> dict:
 
 
 def finish(state: PollState) -> dict:
-    # Unit 12+ insert scoring before this node.
     return {}
 
 
@@ -101,6 +100,10 @@ def build_poll_graph(
         # ponytail: Curated ATS Boards only. Units 21-22 add Adzuna/arbeitnow.
         return {"postings": discover_curated_ats(conn, companies_path)}
 
+    def score(state: PollState) -> dict:
+        """Score Sub-Agent (§4, §6) — skips Postings a Knockout excluded."""
+        return {"postings": score_postings(state["postings"], state["criteria"], conn, companies_path)}
+
     g = StateGraph(PollState)
     g.add_node("plan_search", plan_search)
     g.add_node("search_plan_gate", search_plan_gate)
@@ -109,6 +112,7 @@ def build_poll_graph(
     g.add_node("fetch_jd", fetch_jd)
     g.add_node("staleness", staleness)
     g.add_node("knockout", knockout)
+    g.add_node("score", score)
     g.add_node("finish", finish)
     g.add_edge(START, "plan_search")
     g.add_edge("plan_search", "search_plan_gate")
@@ -119,6 +123,7 @@ def build_poll_graph(
     g.add_edge("dedupe", "fetch_jd")
     g.add_edge("fetch_jd", "staleness")
     g.add_edge("staleness", "knockout")
-    g.add_edge("knockout", "finish")
+    g.add_edge("knockout", "score")
+    g.add_edge("score", "finish")
     g.add_edge("finish", END)
     return g

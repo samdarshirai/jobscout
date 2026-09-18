@@ -192,6 +192,69 @@ def test_poll_graph_keeps_a_cross_source_pair_when_tie_break_says_not_same(
     conn.close()
 
 
+def _seed_posting(conn, posting_id, status="new", missed_polls=0):
+    conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, status, missed_polls) "
+        "VALUES (?, 'arbeitnow', 'Old Co', 'Old Role', ?, ?)",
+        (posting_id, status, missed_polls),
+    )
+    conn.commit()
+
+
+def test_staleness_increments_missed_polls_for_a_posting_missing_this_poll(
+    tmp_path, monkeypatch
+):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    _seed_posting(conn, "gone:1", status="new", missed_polls=0)
+    cfg = {"configurable": {"thread_id": "r14"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    row = conn.execute(
+        "SELECT status, missed_polls FROM app_posting WHERE id = 'gone:1'"
+    ).fetchone()
+    assert row["missed_polls"] == 1
+    assert row["status"] == "new"
+    conn.close()
+
+
+def test_staleness_marks_stale_after_two_consecutive_misses(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    _seed_posting(conn, "gone:1", status="new", missed_polls=1)
+    cfg = {"configurable": {"thread_id": "r15"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    row = conn.execute(
+        "SELECT status, missed_polls FROM app_posting WHERE id = 'gone:1'"
+    ).fetchone()
+    assert row["missed_polls"] == 2
+    assert row["status"] == "stale"
+    conn.close()
+
+
+def test_staleness_leaves_a_posting_present_this_poll_untouched(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    # _FAKE_POSTINGS's id, seeded as a previously-known row with a nonzero
+    # streak — the counter reset for a Posting seen again happens later, in
+    # CoreService._save_discovered_postings, not in this graph node.
+    _seed_posting(conn, _FAKE_POSTINGS[0]["id"], status="new", missed_polls=1)
+    cfg = {"configurable": {"thread_id": "r16"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    row = conn.execute(
+        "SELECT status, missed_polls FROM app_posting WHERE id = ?",
+        (_FAKE_POSTINGS[0]["id"],),
+    ).fetchone()
+    assert row["missed_polls"] == 1
+    assert row["status"] == "new"
+    conn.close()
+
+
 def test_poll_graph_excludes_a_posting_failing_a_knockout(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
     _stub_discovery(monkeypatch)

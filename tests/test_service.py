@@ -168,6 +168,54 @@ def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
     svc.close()
 
 
+def test_resume_run_approve_resets_missed_polls_on_a_reappearing_posting(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
+    fake_posting = {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD",
+    }
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.poll.extract_knockout_facts",
+        lambda jd_text, rules: KnockoutFacts(
+            axes=[AxisFact(axis="seniority_band", passes=True, evidence="Engineer")]
+        ),
+    )
+    monkeypatch.setattr(
+        "jobscout.score.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 80,
+            "rationale": "good fit",
+            "dimensions": [],
+        },
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, missed_polls) "
+        "VALUES (?, 'ats:Acme', 'Acme', 'Engineer', 1)",
+        (fake_posting["id"],),
+    )
+    svc._conn.commit()
+    h = svc.trigger_run()
+    svc.resume_run(h.run_id, "approve")
+
+    row = svc._conn.execute(
+        "SELECT missed_polls FROM app_posting WHERE id = ?", (fake_posting["id"],)
+    ).fetchone()
+    assert row["missed_polls"] == 0
+    svc.close()
+
+
 def test_resume_run_approve_persists_a_score(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN

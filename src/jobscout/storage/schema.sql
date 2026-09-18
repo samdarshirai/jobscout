@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS app_posting (
     status         TEXT NOT NULL DEFAULT 'new',
         -- new | queued | scored | excluded | stale | error | dead | package_ready | applied | skipped (CONTEXT)
     status_reason  TEXT,
+    missed_polls   INTEGER NOT NULL DEFAULT 0,  -- consecutive Polls missing from Source; 2 -> stale (§11)
     first_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );

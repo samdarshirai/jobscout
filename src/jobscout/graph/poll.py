@@ -56,11 +56,6 @@ def fetch_jd(state: PollState) -> dict:
     return {"postings": [p for p in state["postings"] if p.get("jd_text")]}
 
 
-def staleness(state: PollState) -> dict:
-    """Pass-through placeholder — real logic is units 18-19."""
-    return {}
-
-
 def finish(state: PollState) -> dict:
     return {}
 
@@ -108,6 +103,33 @@ def build_poll_graph(
         deduped, rows = spend.run_and_track(_run_tie_breaks)
         spend.log_spend(conn, run_id, "dedupe", rows)
         return {"postings": deduped}
+
+    def staleness(state: PollState) -> dict:
+        """Gone from Source for 2 consecutive Polls -> stale (DESIGN §11).
+        Compares this Poll's freshly-discovered ids against every Posting
+        the DB still has as 'new'/'queued' from a PREVIOUS Poll — this
+        Poll's own batch hasn't been persisted yet at this point in the
+        graph, so the DB read here reflects only prior Polls. No LLM call,
+        no Spend logging."""
+        seen_ids = {p["id"] for p in state["postings"]}
+        rows = conn.execute(
+            "SELECT id, missed_polls FROM app_posting WHERE status IN ('new', 'queued')"
+        ).fetchall()
+        for row in rows:
+            if row["id"] in seen_ids:
+                continue  # still around — _save_discovered_postings resets the counter when it saves this Poll's batch
+            missed = row["missed_polls"] + 1
+            if missed >= 2:
+                conn.execute(
+                    "UPDATE app_posting SET missed_polls = ?, status = 'stale' WHERE id = ?",
+                    (missed, row["id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE app_posting SET missed_polls = ? WHERE id = ?", (missed, row["id"])
+                )
+        conn.commit()
+        return {}
 
     def knockout(state: PollState, config: RunnableConfig) -> dict:
         """An LLM extracts the fact, a rule decides, per Knockout axis (§6).

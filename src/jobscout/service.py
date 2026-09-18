@@ -238,14 +238,18 @@ class CoreService:
     def _save_discovered_postings(self, postings: list[dict]) -> None:
         # unit 11: a Posting failing a Knockout carries status="excluded" +
         # status_reason (§6) — everything else defaults to "new" as before.
+        # unit 19: every Posting here was seen in this Poll, so its
+        # consecutive-miss streak resets — this is also how a Posting that
+        # went briefly stale un-stales on reappearing (§11).
         for p in postings:
             row = {"status": "new", "status_reason": None, **p}
             self._conn.execute(
                 "INSERT INTO app_posting "
-                "(id, source, company, title, city, url, jd_text, status, status_reason) "
-                "VALUES (:id, :source, :company, :title, :city, :url, :jd_text, :status, :status_reason) "
+                "(id, source, company, title, city, url, jd_text, status, status_reason, missed_polls) "
+                "VALUES (:id, :source, :company, :title, :city, :url, :jd_text, :status, :status_reason, 0) "
                 "ON CONFLICT(id) DO UPDATE SET "
-                "last_seen_at = datetime('now'), status = :status, status_reason = :status_reason",
+                "last_seen_at = datetime('now'), status = :status, status_reason = :status_reason, "
+                "missed_polls = 0",
                 row,
             )
         self._conn.commit()

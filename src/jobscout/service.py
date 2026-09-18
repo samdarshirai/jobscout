@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from langgraph.types import Command
 
+from jobscout.criteria import Criteria, DEFAULT_CRITERIA_PATH, read_criteria_file, write_criteria_file
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
 from jobscout.storage.db import (
@@ -49,9 +50,12 @@ def _pending_gate(snapshot) -> object | None:
 
 
 class CoreService:
-    def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
+    def __init__(
+        self, db_path: Path = DEFAULT_DB_PATH, criteria_path: Path | None = None
+    ) -> None:
         self._conn: sqlite3.Connection = get_connection(db_path)
         init_db(self._conn)
+        self._criteria_path = criteria_path or DEFAULT_CRITERIA_PATH
         # ponytail: one connection + one checkpointer for the whole process.
         # Single-process app; move to a pool / async saver only if real
         # concurrency shows up (Unit 2 final review).
@@ -87,12 +91,13 @@ class CoreService:
                 "static_answers": {},
                 "dynamic_questions": [],
                 "dynamic_answers": {},
+                "criteria_draft": {},
             },
             cfg,
         )
         handle = self._handle(self._onboard, _ONBOARD_THREAD)
         if handle.status == "completed":
-            self._save_profile(handle.state)
+            self._save_onboarding_results(handle.state)
         return handle
 
     def resume_onboarding(self, decision: object) -> RunHandle:
@@ -105,10 +110,45 @@ class CoreService:
         self._onboard.invoke(Command(resume=decision), cfg)
         handle = self._handle(self._onboard, _ONBOARD_THREAD)
         if handle.status == "completed":
-            self._save_profile(handle.state)
+            self._save_onboarding_results(handle.state)
         return handle
 
-    def _save_profile(self, state: dict) -> None:
+    def reset_onboarding(self) -> None:
+        # Ruling: tag, don't delete (matches schema.sql's pre_reset design);
+        # app_posting/app_score/app_feedback have no pre_reset column and are
+        # intentionally left untouched — see plan Global Constraints.
+        self._conn.execute("UPDATE app_profile SET pre_reset = 1")
+        self._conn.execute("UPDATE app_criteria SET pre_reset = 1")
+        self._conn.commit()
+        self._checkpointer.delete_thread(_ONBOARD_THREAD)
+
+    def sync_criteria_from_file(self, path: Path | None = None) -> int | None:
+        criteria = read_criteria_file(path or self._criteria_path)
+        new_data = json.dumps(criteria.model_dump())
+        latest = self._conn.execute(
+            "SELECT data_json FROM app_criteria ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if latest is not None and latest["data_json"] == new_data:
+            return None
+        (profile_version,) = self._conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM app_profile"
+        ).fetchone()
+        (version,) = self._conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM app_criteria"
+        ).fetchone()
+        self._conn.execute(
+            "INSERT INTO app_criteria (version, data_json, profile_version) "
+            "VALUES (?, ?, ?)",
+            (version, new_data, profile_version),
+        )
+        self._conn.commit()
+        return version
+
+    def _save_onboarding_results(self, state: dict) -> None:
+        profile_version = self._save_profile(state)
+        self._save_criteria(state, profile_version)
+
+    def _save_profile(self, state: dict) -> int:
         # ponytail: version read-then-insert isn't race-safe under concurrent
         # callers. Fine today — one CLI process, one command at a time. Add
         # locking / a unique constraint retry if a concurrent surface
@@ -127,6 +167,20 @@ class CoreService:
             (version, json.dumps(data), state["resume_text"]),
         )
         self._conn.commit()
+        return version
+
+    def _save_criteria(self, state: dict, profile_version: int) -> None:
+        data = state["criteria_draft"]
+        (version,) = self._conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM app_criteria"
+        ).fetchone()
+        self._conn.execute(
+            "INSERT INTO app_criteria (version, data_json, profile_version) "
+            "VALUES (?, ?, ?)",
+            (version, json.dumps(data), profile_version),
+        )
+        self._conn.commit()
+        write_criteria_file(Criteria(**data), self._criteria_path)
 
     # ---- verdict ------------------------------------------------------
     def record_verdict(

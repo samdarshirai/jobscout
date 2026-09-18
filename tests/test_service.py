@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from jobscout.criteria import Criteria, KnockoutRule, ScoredDimension, write_criteria_file
 from jobscout.resume import ExtractedProfile
 from jobscout.service import CoreService, RunHandle, get_service
 
@@ -10,7 +11,22 @@ FIXTURE = Path(__file__).parent.parent / "data" / "example" / "fake_resume.pdf"
 
 
 def _svc(tmp_path) -> CoreService:
-    return CoreService(db_path=tmp_path / "j.sqlite")
+    return CoreService(
+        db_path=tmp_path / "j.sqlite", criteria_path=tmp_path / "criteria.yaml"
+    )
+
+
+def _sample_criteria() -> Criteria:
+    return Criteria(
+        knockout=[KnockoutRule(axis="seniority_band", rule="senior or mid only")],
+        scored=[
+            ScoredDimension(dimension="stack fit", weight=0.4, rubric="5 = 3+ core tools"),
+            ScoredDimension(dimension="domain/product interest", weight=0.2, rubric="soft"),
+            ScoredDimension(dimension="scope & seniority signals", weight=0.2, rubric="own"),
+            ScoredDimension(dimension="eng-culture signals", weight=0.2, rubric="testing"),
+        ],
+        learn=[],
+    )
 
 
 def test_trigger_run_pauses_at_the_search_plan_gate(tmp_path):
@@ -123,12 +139,16 @@ def test_resume_onboarding_completes_and_persists_merged_profile(tmp_path, monke
         stack=["React"],
         seniority_signals=["Led a team of 4 engineers"],
     )
+    fake_criteria = _sample_criteria()
     monkeypatch.setattr(
         "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
     )
     monkeypatch.setattr(
         "jobscout.graph.onboard.generate_dynamic_questions",
         lambda resume_text, static_answers: ["Vue ok?"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.derive_criteria", lambda profile: fake_criteria
     )
     svc = _svc(tmp_path)
     svc.run_onboarding(str(FIXTURE))
@@ -138,16 +158,27 @@ def test_resume_onboarding_completes_and_persists_merged_profile(tmp_path, monke
     assert h.status == "completed"
     assert h.state["static_answers"] == {"work_mode": "remote"}
     assert h.state["dynamic_answers"] == {"Vue ok?": "yes"}
+    assert h.state["criteria_draft"] == fake_criteria.model_dump()
 
-    rows = svc._conn.execute(
+    profile_rows = svc._conn.execute(
         "SELECT version, data_json, resume_text FROM app_profile"
     ).fetchall()
-    assert len(rows) == 1
-    data = json.loads(rows[0]["data_json"])
+    assert len(profile_rows) == 1
+    data = json.loads(profile_rows[0]["data_json"])
     assert data["resume"] == fake_profile.model_dump()
     assert data["static_answers"] == {"work_mode": "remote"}
     assert data["dynamic_answers"] == {"Vue ok?": "yes"}
-    assert "Jane Doe" in rows[0]["resume_text"]
+
+    criteria_rows = svc._conn.execute(
+        "SELECT version, data_json, profile_version FROM app_criteria"
+    ).fetchall()
+    assert len(criteria_rows) == 1
+    assert criteria_rows[0]["version"] == 1
+    assert criteria_rows[0]["profile_version"] == 1
+    assert json.loads(criteria_rows[0]["data_json"]) == fake_criteria.model_dump()
+
+    assert svc._criteria_path.exists()
+    assert "seniority_band" in svc._criteria_path.read_text()
     svc.close()
 
 
@@ -165,6 +196,9 @@ def test_resume_onboarding_after_completion_is_a_harmless_no_op(tmp_path, monkey
         "jobscout.graph.onboard.generate_dynamic_questions",
         lambda resume_text, static_answers: ["Vue ok?"],
     )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.derive_criteria", lambda profile: _sample_criteria()
+    )
     svc = _svc(tmp_path)
     svc.run_onboarding(str(FIXTURE))
     svc.resume_onboarding({"work_mode": "remote"})
@@ -177,6 +211,8 @@ def test_resume_onboarding_after_completion_is_a_harmless_no_op(tmp_path, monkey
 
     rows = svc._conn.execute("SELECT version FROM app_profile").fetchall()
     assert len(rows) == 1
+    criteria_rows = svc._conn.execute("SELECT version FROM app_criteria").fetchall()
+    assert len(criteria_rows) == 1
     svc.close()
 
 
@@ -184,6 +220,75 @@ def test_resume_onboarding_rejects_when_no_run_in_progress(tmp_path):
     svc = _svc(tmp_path)
     with pytest.raises(ValueError, match="no onboarding run"):
         svc.resume_onboarding("anything")
+    svc.close()
+
+
+def test_sync_criteria_from_file_bumps_a_new_version_on_change(tmp_path):
+    svc = _svc(tmp_path)
+    criteria_v1 = _sample_criteria()
+    write_criteria_file(criteria_v1, svc._criteria_path)
+
+    version1 = svc.sync_criteria_from_file()
+    assert version1 == 1
+
+    criteria_v2 = criteria_v1.model_copy(update={"learn": ["new signal"]})
+    write_criteria_file(criteria_v2, svc._criteria_path)
+
+    version2 = svc.sync_criteria_from_file()
+    assert version2 == 2
+
+    rows = svc._conn.execute("SELECT version FROM app_criteria ORDER BY version").fetchall()
+    assert [r["version"] for r in rows] == [1, 2]
+    svc.close()
+
+
+def test_sync_criteria_from_file_is_a_noop_when_unchanged(tmp_path):
+    svc = _svc(tmp_path)
+    criteria = _sample_criteria()
+    write_criteria_file(criteria, svc._criteria_path)
+    svc.sync_criteria_from_file()
+
+    result = svc.sync_criteria_from_file()
+
+    assert result is None
+    rows = svc._conn.execute("SELECT version FROM app_criteria").fetchall()
+    assert len(rows) == 1
+    svc.close()
+
+
+def test_reset_onboarding_tags_pre_reset_and_clears_the_thread(tmp_path, monkeypatch):
+    fake_profile = ExtractedProfile(
+        roles=["Senior Frontend Engineer"],
+        years_experience=6.0,
+        stack=["React"],
+        seniority_signals=["Led a team of 4 engineers"],
+    )
+    fake_criteria = _sample_criteria()
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.generate_dynamic_questions",
+        lambda resume_text, static_answers: ["Q1?"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.derive_criteria", lambda profile: fake_criteria
+    )
+    svc = _svc(tmp_path)
+    svc.run_onboarding(str(FIXTURE))
+    svc.resume_onboarding({"work_mode": "remote"})
+    svc.resume_onboarding({"Q1?": "answer"})
+
+    svc.reset_onboarding()
+
+    profile_rows = svc._conn.execute("SELECT pre_reset FROM app_profile").fetchall()
+    assert all(r["pre_reset"] == 1 for r in profile_rows)
+    criteria_rows = svc._conn.execute("SELECT pre_reset FROM app_criteria").fetchall()
+    assert all(r["pre_reset"] == 1 for r in criteria_rows)
+
+    h = svc.run_onboarding(str(FIXTURE))
+    assert h.status == "paused"
+    assert h.pending_gate["gate"] == "static_questions"
     svc.close()
 
 

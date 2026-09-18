@@ -14,7 +14,9 @@ _FAKE_PLAN = SearchPlan(queries=["senior frontend engineer"], sources=["adzuna"]
 
 def _svc(tmp_path) -> CoreService:
     return CoreService(
-        db_path=tmp_path / "j.sqlite", criteria_path=tmp_path / "criteria.yaml"
+        db_path=tmp_path / "j.sqlite",
+        criteria_path=tmp_path / "criteria.yaml",
+        companies_path=tmp_path / "companies.yaml",
     )
 
 
@@ -83,6 +85,50 @@ def test_resume_run_reject_completes(tmp_path, monkeypatch):
     done = svc.resume_run(h.run_id, "reject")
     assert done.status == "completed"
     assert done.state["decision"] == "reject"
+    svc.close()
+
+
+def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
+    fake_posting = {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD",
+    }
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    h = svc.trigger_run()
+    svc.resume_run(h.run_id, "approve")
+
+    row = svc._conn.execute(
+        "SELECT source, company, title, jd_text FROM app_posting WHERE id = ?",
+        (fake_posting["id"],),
+    ).fetchone()
+    assert row["company"] == "Acme"
+    assert row["jd_text"] == "JD"
+    svc.close()
+
+
+def test_resume_run_reject_persists_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    h = svc.trigger_run()
+    svc.resume_run(h.run_id, "reject")
+
+    rows = svc._conn.execute("SELECT * FROM app_posting").fetchall()
+    assert rows == []
     svc.close()
 
 

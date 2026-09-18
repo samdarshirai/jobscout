@@ -1,16 +1,21 @@
 """Poll graph (DESIGN §4).
 
 Real shape:  plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> score -> finish
-This unit:   plan_search --(gate)--> finish
+This unit:   plan_search --(gate)--> discover --> finish
 
-Units 9-17 insert discovery/scoring nodes between the gate and `finish`.
+Unit 10 inserts dedupe/fetch_jd/staleness between `discover` and
+`finish`; unit 12 adds the `score` sub-agent after that.
 """
 
+import sqlite3
+from pathlib import Path
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
+from jobscout.discovery.curated_ats import discover_curated_ats
 from jobscout.search_plan import derive_search_plan
 
 
@@ -35,26 +40,34 @@ def search_plan_gate(state: PollState) -> dict:
     return {"decision": str(decision)}
 
 
-def finish(state: PollState) -> dict:
-    # Units 10+ insert discover/dedupe/fetch_jd/staleness/score before this node.
-    return {}
-
-
 def _after_gate(state: PollState) -> str:
     """Fail closed (DESIGN §10): only an explicit 'approve' proceeds.
     Anything else — 'reject', a typo, None — aborts the Run."""
-    return "finish" if state["decision"] == "approve" else END
+    return "discover" if state["decision"] == "approve" else END
 
 
-def build_poll_graph() -> StateGraph:
+def finish(state: PollState) -> dict:
+    # Units 11+ insert knockouts/queueing/scoring before this node.
+    return {}
+
+
+def build_poll_graph(
+    conn: sqlite3.Connection, companies_path: Path = DEFAULT_COMPANIES_PATH
+) -> StateGraph:
+    def discover(state: PollState) -> dict:
+        # ponytail: Curated ATS Boards only. Units 21-22 add Adzuna/arbeitnow.
+        return {"postings": discover_curated_ats(conn, companies_path)}
+
     g = StateGraph(PollState)
     g.add_node("plan_search", plan_search)
     g.add_node("search_plan_gate", search_plan_gate)
+    g.add_node("discover", discover)
     g.add_node("finish", finish)
     g.add_edge(START, "plan_search")
     g.add_edge("plan_search", "search_plan_gate")
     g.add_conditional_edges(
-        "search_plan_gate", _after_gate, {"finish": "finish", END: END}
+        "search_plan_gate", _after_gate, {"discover": "discover", END: END}
     )
+    g.add_edge("discover", "finish")
     g.add_edge("finish", END)
     return g

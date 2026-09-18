@@ -18,6 +18,7 @@ from uuid import uuid4
 from langgraph.types import Command
 
 from jobscout.criteria import Criteria, DEFAULT_CRITERIA_PATH, read_criteria_file, write_criteria_file
+from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
 from jobscout.storage.db import (
@@ -51,16 +52,22 @@ def _pending_gate(snapshot) -> object | None:
 
 class CoreService:
     def __init__(
-        self, db_path: Path = DEFAULT_DB_PATH, criteria_path: Path | None = None
+        self,
+        db_path: Path = DEFAULT_DB_PATH,
+        criteria_path: Path | None = None,
+        companies_path: Path | None = None,
     ) -> None:
         self._conn: sqlite3.Connection = get_connection(db_path)
         init_db(self._conn)
         self._criteria_path = criteria_path or DEFAULT_CRITERIA_PATH
+        self._companies_path = companies_path or DEFAULT_COMPANIES_PATH
         # ponytail: one connection + one checkpointer for the whole process.
         # Single-process app; move to a pool / async saver only if real
         # concurrency shows up (Unit 2 final review).
         self._checkpointer = get_checkpointer(self._conn)
-        self._poll = build_poll_graph().compile(checkpointer=self._checkpointer)
+        self._poll = build_poll_graph(self._conn, self._companies_path).compile(
+            checkpointer=self._checkpointer
+        )
         self._onboard = build_onboard_graph().compile(
             checkpointer=self._checkpointer
         )
@@ -78,7 +85,10 @@ class CoreService:
         if not self._poll.get_state(cfg).created_at:
             raise ValueError(f"no such run: {run_id!r}")
         self._poll.invoke(Command(resume=decision), cfg)
-        return self._handle(self._poll, run_id)
+        handle = self._handle(self._poll, run_id)
+        if handle.status == "completed":
+            self._save_discovered_postings(handle.state.get("postings", []))
+        return handle
 
     def run_onboarding(self, resume_path: str | None = None) -> RunHandle:
         if not resume_path:
@@ -191,6 +201,16 @@ class CoreService:
         )
         self._conn.commit()
         write_criteria_file(Criteria(**data), self._criteria_path)
+
+    def _save_discovered_postings(self, postings: list[dict]) -> None:
+        for p in postings:
+            self._conn.execute(
+                "INSERT INTO app_posting (id, source, company, title, city, url, jd_text) "
+                "VALUES (:id, :source, :company, :title, :city, :url, :jd_text) "
+                "ON CONFLICT(id) DO UPDATE SET last_seen_at = datetime('now')",
+                p,
+            )
+        self._conn.commit()
 
     # ---- verdict ------------------------------------------------------
     def record_verdict(

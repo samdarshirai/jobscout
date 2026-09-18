@@ -12,12 +12,23 @@ from jobscout.storage.db import get_checkpointer, get_connection, init_db
 POLL_INIT = {"criteria": {}, "search_plan": {}, "decision": "", "postings": []}
 FIXTURE = Path(__file__).parent.parent.parent / "data" / "example" / "fake_resume.pdf"
 _FAKE_PLAN = SearchPlan(queries=["senior frontend engineer"], sources=["adzuna"], companies=[])
+_FAKE_POSTINGS = [
+    {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD",
+    }
+]
 
 
-def _compile(builder, tmp_path):
+def _compile(build_fn, tmp_path):
     conn = get_connection(tmp_path / "j.sqlite")
     init_db(conn)
-    graph = builder().compile(checkpointer=get_checkpointer(conn))
+    graph = build_fn(conn).compile(checkpointer=get_checkpointer(conn))
     return graph, conn
 
 
@@ -27,9 +38,15 @@ def _stub_search_plan(monkeypatch):
     )
 
 
+def _stub_discovery(monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _FAKE_POSTINGS
+    )
+
+
 def test_poll_graph_pauses_at_the_search_plan_gate(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
-    graph, conn = _compile(build_poll_graph, tmp_path)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r1"}}
     graph.invoke(POLL_INIT, cfg)
     state = graph.get_state(cfg)
@@ -38,33 +55,36 @@ def test_poll_graph_pauses_at_the_search_plan_gate(tmp_path, monkeypatch):
     conn.close()
 
 
-def test_poll_graph_approve_runs_to_end(tmp_path, monkeypatch):
+def test_poll_graph_approve_runs_discover_then_ends(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
-    graph, conn = _compile(build_poll_graph, tmp_path)
+    _stub_discovery(monkeypatch)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r2"}}
     graph.invoke(POLL_INIT, cfg)
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
     assert state.next == ()
     assert state.values["decision"] == "approve"
+    assert state.values["postings"] == _FAKE_POSTINGS
     conn.close()
 
 
 def test_poll_graph_reject_routes_straight_to_end(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
-    graph, conn = _compile(build_poll_graph, tmp_path)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r3"}}
     graph.invoke(POLL_INIT, cfg)
     graph.invoke(Command(resume="reject"), cfg)
     state = graph.get_state(cfg)
     assert state.next == ()
     assert state.values["decision"] == "reject"
+    assert state.values["postings"] == []
     conn.close()
 
 
 def test_poll_graph_unrecognized_decision_fails_closed(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
-    graph, conn = _compile(build_poll_graph, tmp_path)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r4"}}
     graph.invoke(POLL_INIT, cfg)
     graph.invoke(Command(resume="garbage"), cfg)
@@ -101,7 +121,7 @@ def test_onboard_graph_walks_through_both_gates_and_derives_criteria(tmp_path, m
     monkeypatch.setattr(
         "jobscout.graph.onboard.derive_criteria", lambda profile: fake_criteria
     )
-    graph, conn = _compile(build_onboard_graph, tmp_path)
+    graph, conn = _compile(lambda conn: build_onboard_graph(), tmp_path)
     cfg = {"configurable": {"thread_id": "onboard"}}
 
     graph.invoke(

@@ -100,6 +100,7 @@ def test_resume_run_approve_completes(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     svc = _svc(tmp_path)
     _seed_criteria(svc)
     h = svc.trigger_run()
@@ -138,8 +139,9 @@ def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
         "jd_text": "JD",
     }
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: [fake_posting]
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
         lambda jd_text, rules: KnockoutFacts(
@@ -182,8 +184,9 @@ def test_resume_run_approve_resets_missed_polls_on_a_reappearing_posting(tmp_pat
         "jd_text": "JD",
     }
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: [fake_posting]
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
         lambda jd_text, rules: KnockoutFacts(
@@ -230,8 +233,9 @@ def test_resume_run_approve_persists_a_score(tmp_path, monkeypatch):
         "jd_text": "JD",
     }
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: [fake_posting]
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
         lambda jd_text, rules: KnockoutFacts(
@@ -278,8 +282,9 @@ def test_resume_run_approve_persists_a_knockout_exclusion(tmp_path, monkeypatch)
         "jd_text": "JD",
     }
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: [fake_posting]
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: [fake_posting]
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
         lambda jd_text, rules: KnockoutFacts(

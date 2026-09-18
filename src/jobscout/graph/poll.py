@@ -6,10 +6,12 @@ service-layer read of persisted status/score, not a new graph node.
 """
 
 import hashlib
+import os
 import sqlite3
 from pathlib import Path
 from typing import TypedDict
 
+import httpx
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -17,8 +19,11 @@ from langgraph.types import interrupt
 from jobscout import spend
 from jobscout.criteria import KnockoutRule
 from jobscout.dedupe import same_posting_cached
+from jobscout.discovery.adzuna import discover_adzuna
+from jobscout.discovery.arbeitnow import discover_arbeitnow
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.discovery.curated_ats import discover_curated_ats
+from jobscout.discovery.fallback import fetch_page_text
 from jobscout.knockout import decide_knockout, extract_knockout_facts
 from jobscout.score import score_postings
 from jobscout.search_plan import derive_search_plan
@@ -50,17 +55,32 @@ def _normalize(text: str) -> str:
 
 def fetch_jd(state: PollState) -> dict:
     """A Posting missing JD text does not reach scoring (DESIGN §4).
-    ponytail: Curated ATS Sources (unit 9) already return full JD text
-    inline — this is a filter, not a fetch, until units 21-22 add
-    summary-only Sources (Adzuna/arbeitnow) that need a real HTTP call
-    added here. Stamps content_hash here too (DESIGN §11) — the score
-    node uses a changed hash to decide a Posting needs re-scoring."""
+    Curated ATS / arbeitnow Postings (units 9, 22) already carry full JD
+    text inline — this is a filter for those. Adzuna Postings (unit 21)
+    carry only Adzuna's own truncated summary in `jd_text`, so for
+    `source == "adzuna"` this follows the Posting's `url` (Adzuna's
+    `redirect_url`) and re-extracts with the same whole-page
+    trafilatura path `discovery/fallback.py` uses for careers pages,
+    upgrading to the real JD text; a failed fetch or empty extraction
+    (§17 — dead link, JS-only page, recruiter-spam page) falls back to
+    the adapter's truncated summary rather than dropping the Posting.
+    Stamps content_hash here too (DESIGN §11) — the score node uses a
+    changed hash to decide a Posting needs re-scoring."""
     postings = []
-    for p in state["postings"]:
-        if not p.get("jd_text"):
-            continue
-        content_hash = hashlib.sha256(p["jd_text"].encode()).hexdigest()
-        postings.append({**p, "content_hash": content_hash})
+    client = httpx.Client(timeout=10.0)
+    try:
+        for p in state["postings"]:
+            jd_text = p.get("jd_text")
+            if p.get("source") == "adzuna" and p.get("url"):
+                upgraded = fetch_page_text(client, p["url"])
+                if upgraded:
+                    jd_text = upgraded
+            if not jd_text:
+                continue
+            content_hash = hashlib.sha256(jd_text.encode()).hexdigest()
+            postings.append({**p, "jd_text": jd_text, "content_hash": content_hash})
+    finally:
+        client.close()
     return {"postings": postings}
 
 
@@ -78,8 +98,22 @@ def build_poll_graph(
         return {"search_plan": plan.model_dump()}
 
     def discover(state: PollState) -> dict:
-        # ponytail: Curated ATS Boards only. Units 21-22 add Adzuna/arbeitnow.
-        return {"postings": discover_curated_ats(conn, companies_path)}
+        """Curated ATS Boards (unit 9) + Adzuna (unit 21) + arbeitnow
+        (unit 22), DESIGN §3's three discovery Sources — one shared
+        client. Adzuna needs a free app_id+key (`.env.example`); when
+        unset, Adzuna discovery is skipped rather than failing the Poll
+        (§17), since it's a supplementary Source, not the only one."""
+        client = httpx.Client(timeout=10.0)
+        try:
+            postings = discover_curated_ats(conn, companies_path, client)
+            app_id = os.environ.get("ADZUNA_APP_ID")
+            app_key = os.environ.get("ADZUNA_APP_KEY")
+            if app_id and app_key:
+                postings += discover_adzuna(client, app_id, app_key)
+            postings += discover_arbeitnow(client)
+            return {"postings": postings}
+        finally:
+            client.close()
 
     def dedupe(state: PollState, config: RunnableConfig) -> dict:
         """Exact-key dedupe first (DESIGN §11) — a same-id Posting

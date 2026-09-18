@@ -112,8 +112,9 @@ def _stub_search_plan(monkeypatch):
 
 def _stub_discovery(monkeypatch):
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _FAKE_POSTINGS
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: _FAKE_POSTINGS
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
 
 
 def test_poll_graph_pauses_at_the_search_plan_gate(tmp_path, monkeypatch):
@@ -144,8 +145,9 @@ def test_poll_graph_approve_runs_discover_then_ends(tmp_path, monkeypatch):
 def test_poll_graph_dedupes_same_id_within_one_batch(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _DUPLICATE_POSTINGS
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: _DUPLICATE_POSTINGS
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r5"}}
     graph.invoke(POLL_INIT, cfg)
@@ -158,8 +160,9 @@ def test_poll_graph_dedupes_same_id_within_one_batch(tmp_path, monkeypatch):
 def test_poll_graph_drops_postings_with_no_jd_text(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _MIXED_JD_POSTINGS
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: _MIXED_JD_POSTINGS
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r6"}}
     graph.invoke(POLL_INIT, cfg)
@@ -174,8 +177,9 @@ def test_poll_graph_collapses_a_cross_source_duplicate_when_tie_break_says_same(
 ):
     _stub_search_plan(monkeypatch)
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _CROSS_SOURCE_POSTINGS
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: _CROSS_SOURCE_POSTINGS
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr("jobscout.graph.poll.same_posting_cached", lambda conn, a, b: True)
     graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r12"}}
@@ -191,8 +195,9 @@ def test_poll_graph_keeps_a_cross_source_pair_when_tie_break_says_not_same(
 ):
     _stub_search_plan(monkeypatch)
     monkeypatch.setattr(
-        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _CROSS_SOURCE_POSTINGS
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path, client: _CROSS_SOURCE_POSTINGS
     )
+    monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr("jobscout.graph.poll.same_posting_cached", lambda conn, a, b: False)
     graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
     cfg = {"configurable": {"thread_id": "r13"}}

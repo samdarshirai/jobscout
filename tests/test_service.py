@@ -37,6 +37,13 @@ def test_resume_run_reject_completes(tmp_path):
     svc.close()
 
 
+def test_resume_run_rejects_unknown_run_id(tmp_path):
+    svc = _svc(tmp_path)
+    with pytest.raises(ValueError):
+        svc.resume_run("does-not-exist", "approve")
+    svc.close()
+
+
 def test_record_verdict_writes_one_feedback_row(tmp_path):
     svc = _svc(tmp_path)
     svc._conn.execute(

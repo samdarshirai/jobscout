@@ -69,6 +69,8 @@ class CoreService:
 
     def resume_run(self, run_id: str, decision: object) -> RunHandle:
         cfg = {"configurable": {"thread_id": run_id}}
+        if not self._poll.get_state(cfg).created_at:
+            raise ValueError(f"no such run: {run_id!r}")
         self._poll.invoke(Command(resume=decision), cfg)
         return self._handle(self._poll, run_id)
 

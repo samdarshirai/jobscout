@@ -38,7 +38,9 @@ def finish(state: PollState) -> dict:
 
 
 def _after_gate(state: PollState) -> str:
-    return END if state["decision"] == "reject" else "finish"
+    """Fail closed (DESIGN §10): only an explicit 'approve' proceeds.
+    Anything else — 'reject', a typo, None — aborts the Run."""
+    return "finish" if state["decision"] == "approve" else END
 
 
 def build_poll_graph() -> StateGraph:

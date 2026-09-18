@@ -44,6 +44,17 @@ def test_poll_graph_reject_routes_straight_to_end(tmp_path):
     conn.close()
 
 
+def test_poll_graph_unrecognized_decision_fails_closed(tmp_path):
+    graph, conn = _compile(build_poll_graph, tmp_path)
+    cfg = {"configurable": {"thread_id": "r4"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="garbage"), cfg)
+    state = graph.get_state(cfg)
+    assert state.next == ()
+    assert state.values["decision"] == "garbage"
+    conn.close()
+
+
 def test_onboard_graph_runs_to_end_and_is_checkpointed(tmp_path):
     graph, conn = _compile(build_onboard_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "onboard"}}

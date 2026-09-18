@@ -1,10 +1,9 @@
-"""Poll graph — skeleton (DESIGN §4).
+"""Poll graph (DESIGN §4).
 
 Real shape:  plan_search --(gate)--> discover -> dedupe -> fetch_jd -> staleness -> score -> finish
 This unit:   plan_search --(gate)--> finish
 
-`plan_search` is a stub (no LLM). Units 8-17 make it the real structured
-LLM call and insert discovery/scoring nodes between the gate and `finish`.
+Units 9-17 insert discovery/scoring nodes between the gate and `finish`.
 """
 
 from typing import TypedDict
@@ -12,17 +11,21 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from jobscout.search_plan import derive_search_plan
+
 
 class PollState(TypedDict):
+    criteria: dict
     search_plan: dict
     decision: str
     postings: list
 
 
 def plan_search(state: PollState) -> dict:
-    # ponytail: stub plan. Unit 8 replaces this with the structured LLM call
-    # that emits real queries + Sources + companies, and logs Spend (§13).
-    return {"search_plan": {"queries": [], "sources": [], "companies": []}}
+    # ponytail: no Spend logging yet (§13) — same reasoning as onboard's LLM
+    # nodes (units 5-7); the cap-enforcement machinery (unit 15) doesn't exist yet.
+    plan = derive_search_plan(state["criteria"])
+    return {"search_plan": plan.model_dump()}
 
 
 def search_plan_gate(state: PollState) -> dict:

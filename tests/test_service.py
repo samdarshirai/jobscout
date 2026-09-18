@@ -5,9 +5,11 @@ import pytest
 
 from jobscout.criteria import Criteria, KnockoutRule, ScoredDimension, write_criteria_file
 from jobscout.resume import ExtractedProfile
+from jobscout.search_plan import SearchPlan
 from jobscout.service import CoreService, RunHandle, get_service
 
 FIXTURE = Path(__file__).parent.parent / "data" / "example" / "fake_resume.pdf"
+_FAKE_PLAN = SearchPlan(queries=["senior frontend engineer"], sources=["adzuna"], companies=[])
 
 
 def _svc(tmp_path) -> CoreService:
@@ -29,18 +31,39 @@ def _sample_criteria() -> Criteria:
     )
 
 
-def test_trigger_run_pauses_at_the_search_plan_gate(tmp_path):
+def _seed_criteria(svc: CoreService) -> None:
+    write_criteria_file(_sample_criteria(), svc._criteria_path)
+    svc.sync_criteria_from_file()
+
+
+def test_trigger_run_pauses_at_the_search_plan_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
     svc = _svc(tmp_path)
+    _seed_criteria(svc)
     h = svc.trigger_run()
     assert isinstance(h, RunHandle)
     assert h.status == "paused"
     assert h.pending_gate is not None
     assert h.pending_gate["gate"] == "search_plan"
+    assert h.pending_gate["plan"] == _FAKE_PLAN.model_dump()
     svc.close()
 
 
-def test_resume_run_approve_completes(tmp_path):
+def test_trigger_run_requires_criteria(tmp_path):
     svc = _svc(tmp_path)
+    with pytest.raises(ValueError, match="no criteria found"):
+        svc.trigger_run()
+    svc.close()
+
+
+def test_resume_run_approve_completes(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
     h = svc.trigger_run()
     done = svc.resume_run(h.run_id, "approve")
     assert done.run_id == h.run_id
@@ -50,8 +73,12 @@ def test_resume_run_approve_completes(tmp_path):
     svc.close()
 
 
-def test_resume_run_reject_completes(tmp_path):
+def test_resume_run_reject_completes(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
     svc = _svc(tmp_path)
+    _seed_criteria(svc)
     h = svc.trigger_run()
     done = svc.resume_run(h.run_id, "reject")
     assert done.status == "completed"
@@ -299,7 +326,11 @@ def test_one_connection_and_one_checkpointer_for_the_service(tmp_path, monkeypat
             roles=[], years_experience=0.0, stack=[], seniority_signals=[]
         ),
     )
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
     svc = _svc(tmp_path)
+    _seed_criteria(svc)
     svc.trigger_run()
     svc.run_onboarding(str(FIXTURE))
     assert svc._poll.checkpointer is svc._checkpointer
@@ -308,8 +339,12 @@ def test_one_connection_and_one_checkpointer_for_the_service(tmp_path, monkeypat
     svc.close()
 
 
-def test_public_surface_hands_back_no_graph_objects(tmp_path):
+def test_public_surface_hands_back_no_graph_objects(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
     svc = _svc(tmp_path)
+    _seed_criteria(svc)
     h = svc.trigger_run()
     for value in (h.run_id, h.status, h.pending_gate, h.state):
         assert isinstance(value, (str, dict, list, bool, int, type(None)))

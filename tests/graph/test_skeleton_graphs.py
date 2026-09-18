@@ -6,10 +6,12 @@ from jobscout.criteria import Criteria, KnockoutRule, ScoredDimension
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
 from jobscout.resume import ExtractedProfile
+from jobscout.search_plan import SearchPlan
 from jobscout.storage.db import get_checkpointer, get_connection, init_db
 
-POLL_INIT = {"search_plan": {}, "decision": "", "postings": []}
+POLL_INIT = {"criteria": {}, "search_plan": {}, "decision": "", "postings": []}
 FIXTURE = Path(__file__).parent.parent.parent / "data" / "example" / "fake_resume.pdf"
+_FAKE_PLAN = SearchPlan(queries=["senior frontend engineer"], sources=["adzuna"], companies=[])
 
 
 def _compile(builder, tmp_path):
@@ -19,15 +21,25 @@ def _compile(builder, tmp_path):
     return graph, conn
 
 
-def test_poll_graph_pauses_at_the_search_plan_gate(tmp_path):
+def _stub_search_plan(monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.poll.derive_search_plan", lambda criteria: _FAKE_PLAN
+    )
+
+
+def test_poll_graph_pauses_at_the_search_plan_gate(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
     graph, conn = _compile(build_poll_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "r1"}}
     graph.invoke(POLL_INIT, cfg)
-    assert graph.get_state(cfg).next == ("search_plan_gate",)
+    state = graph.get_state(cfg)
+    assert state.next == ("search_plan_gate",)
+    assert state.values["search_plan"] == _FAKE_PLAN.model_dump()
     conn.close()
 
 
-def test_poll_graph_approve_runs_to_end(tmp_path):
+def test_poll_graph_approve_runs_to_end(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
     graph, conn = _compile(build_poll_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "r2"}}
     graph.invoke(POLL_INIT, cfg)
@@ -38,7 +50,8 @@ def test_poll_graph_approve_runs_to_end(tmp_path):
     conn.close()
 
 
-def test_poll_graph_reject_routes_straight_to_end(tmp_path):
+def test_poll_graph_reject_routes_straight_to_end(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
     graph, conn = _compile(build_poll_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "r3"}}
     graph.invoke(POLL_INIT, cfg)
@@ -49,7 +62,8 @@ def test_poll_graph_reject_routes_straight_to_end(tmp_path):
     conn.close()
 
 
-def test_poll_graph_unrecognized_decision_fails_closed(tmp_path):
+def test_poll_graph_unrecognized_decision_fails_closed(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
     graph, conn = _compile(build_poll_graph, tmp_path)
     cfg = {"configurable": {"thread_id": "r4"}}
     graph.invoke(POLL_INIT, cfg)

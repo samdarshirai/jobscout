@@ -28,7 +28,7 @@ from jobscout.storage.db import (
 )
 
 _VERDICTS = ("up", "down")
-_POLL_INIT = {"search_plan": {}, "decision": "", "postings": []}
+_POLL_INIT = {"criteria": {}, "search_plan": {}, "decision": "", "postings": []}
 _ONBOARD_THREAD = "onboard"
 
 
@@ -69,7 +69,8 @@ class CoreService:
     def trigger_run(self) -> RunHandle:
         run_id = uuid4().hex
         cfg = {"configurable": {"thread_id": run_id}}
-        self._poll.invoke(dict(_POLL_INIT), cfg)
+        init = dict(_POLL_INIT, criteria=self._latest_criteria_data())
+        self._poll.invoke(init, cfg)
         return self._handle(self._poll, run_id)
 
     def resume_run(self, run_id: str, decision: object) -> RunHandle:
@@ -125,9 +126,7 @@ class CoreService:
     def sync_criteria_from_file(self, path: Path | None = None) -> int | None:
         criteria = read_criteria_file(path or self._criteria_path)
         new_data = json.dumps(criteria.model_dump())
-        latest = self._conn.execute(
-            "SELECT data_json FROM app_criteria ORDER BY version DESC LIMIT 1"
-        ).fetchone()
+        latest = self._latest_criteria_row()
         if latest is not None and latest["data_json"] == new_data:
             return None
         (profile_version,) = self._conn.execute(
@@ -143,6 +142,17 @@ class CoreService:
         )
         self._conn.commit()
         return version
+
+    def _latest_criteria_row(self):
+        return self._conn.execute(
+            "SELECT data_json FROM app_criteria ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+
+    def _latest_criteria_data(self) -> dict:
+        row = self._latest_criteria_row()
+        if row is None:
+            raise ValueError("no criteria found — run onboarding first")
+        return json.loads(row["data_json"])
 
     def _save_onboarding_results(self, state: dict) -> None:
         profile_version = self._save_profile(state)

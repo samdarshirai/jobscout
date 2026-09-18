@@ -27,6 +27,7 @@ from jobscout.storage.db import (
     get_connection,
     init_db,
 )
+from jobscout.tracing import configure_tracing
 
 _VERDICTS = ("up", "down")
 _POLL_INIT = {"criteria": {}, "search_plan": {}, "decision": "", "postings": []}
@@ -70,6 +71,7 @@ class CoreService:
         criteria_path: Path | None = None,
         companies_path: Path | None = None,
     ) -> None:
+        configure_tracing()  # §16: tracing on from the first Run
         self._conn: sqlite3.Connection = get_connection(db_path)
         init_db(self._conn)
         self._criteria_path = criteria_path or DEFAULT_CRITERIA_PATH

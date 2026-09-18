@@ -326,6 +326,105 @@ def test_resume_run_rejects_unknown_run_id(tmp_path):
     svc.close()
 
 
+def _seed_posting_with_jd(svc: CoreService, posting_id="ats:Acme:acme:1") -> None:
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, jd_text) "
+        "VALUES (?, 'ats:Acme', 'Acme', 'Engineer', 'We need a senior backend engineer.')",
+        (posting_id,),
+    )
+    svc._conn.commit()
+
+
+def _seed_profile(svc: CoreService, german_level="native") -> None:
+    svc._conn.execute(
+        "INSERT INTO app_profile (version, data_json, resume_text) VALUES (1, ?, ?)",
+        (
+            json.dumps({"resume": {}, "static_answers": {"german_level": german_level}, "dynamic_answers": {}}),
+            "5 years Python.",
+        ),
+    )
+    svc._conn.commit()
+
+
+def test_draft_letter_for_posting_pauses_at_the_outbound_letter_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.letter.draft_letter",
+        lambda jd_text, resume_text, profile, voice_notes: type(
+            "D", (), {"model_dump": lambda self: {"body": "Dear team...", "language": "english", "flag": None}}
+        )(),
+    )
+    svc = _svc(tmp_path)
+    _seed_posting_with_jd(svc)
+    _seed_profile(svc)
+
+    h = svc.draft_letter_for_posting("ats:Acme:acme:1")
+
+    assert h.status == "paused"
+    assert h.pending_gate["gate"] == "outbound_letter"
+    assert h.state["draft"]["body"] == "Dear team..."
+    svc.close()
+
+
+def test_draft_letter_for_posting_requires_a_posting_with_jd_text(tmp_path):
+    svc = _svc(tmp_path)
+    with pytest.raises(ValueError):
+        svc.draft_letter_for_posting("does-not-exist")
+    svc.close()
+
+
+def test_resume_letter_approve_runs_faithfulness_then_completes(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.letter.draft_letter",
+        lambda jd_text, resume_text, profile, voice_notes: type(
+            "D", (), {"model_dump": lambda self: {"body": "Dear team...", "language": "english", "flag": None}}
+        )(),
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.letter.check_faithfulness",
+        lambda letter_body, resume_text: type(
+            "F", (), {"model_dump": lambda self: {"claims": []}}
+        )(),
+    )
+    svc = _svc(tmp_path)
+    _seed_posting_with_jd(svc)
+    _seed_profile(svc)
+    h = svc.draft_letter_for_posting("ats:Acme:acme:1")
+
+    done = svc.resume_letter(h.run_id, "approve")
+
+    assert done.status == "completed"
+    assert done.state["faithfulness"] == {"claims": []}
+    svc.close()
+
+
+def test_get_fit_notes_calls_generate_fit_notes_with_jd_and_resume(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_generate(jd_text, resume_text):
+        captured["jd_text"] = jd_text
+        captured["resume_text"] = resume_text
+        return type("N", (), {"model_dump": lambda self: {"gaps": []}})()
+
+    monkeypatch.setattr("jobscout.service.generate_fit_notes", fake_generate)
+    svc = _svc(tmp_path)
+    _seed_posting_with_jd(svc)
+    _seed_profile(svc)
+
+    result = svc.get_fit_notes("ats:Acme:acme:1")
+
+    assert result == {"gaps": []}
+    assert captured["jd_text"] == "We need a senior backend engineer."
+    assert captured["resume_text"] == "5 years Python."
+    svc.close()
+
+
+def test_get_fit_notes_requires_a_posting_with_jd_text(tmp_path):
+    svc = _svc(tmp_path)
+    with pytest.raises(ValueError):
+        svc.get_fit_notes("does-not-exist")
+    svc.close()
+
+
 def test_record_verdict_writes_one_feedback_row(tmp_path):
     svc = _svc(tmp_path)
     svc._conn.execute(

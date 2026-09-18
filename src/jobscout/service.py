@@ -20,6 +20,8 @@ from langgraph.types import Command
 from jobscout.criteria import Criteria, DEFAULT_CRITERIA_PATH, read_criteria_file, write_criteria_file
 from jobscout import spend
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
+from jobscout.fit_notes import generate_fit_notes
+from jobscout.graph.letter import build_letter_graph
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
 from jobscout.storage.db import (
@@ -33,6 +35,8 @@ from jobscout.tracing import configure_tracing
 _VERDICTS = ("up", "down")
 _POLL_INIT = {"criteria": {}, "search_plan": {}, "decision": "", "postings": []}
 _ONBOARD_THREAD = "onboard"
+_LETTER_INIT = {"draft": {}, "decision": "", "faithfulness": {}}
+DEFAULT_VOICE_NOTES_PATH = Path("voice.md")  # optional, DESIGN §8
 
 
 @dataclass(frozen=True)
@@ -72,12 +76,14 @@ class CoreService:
         db_path: Path = DEFAULT_DB_PATH,
         criteria_path: Path | None = None,
         companies_path: Path | None = None,
+        voice_notes_path: Path | None = None,
     ) -> None:
         configure_tracing()  # §16: tracing on from the first Run
         self._conn: sqlite3.Connection = get_connection(db_path)
         init_db(self._conn)
         self._criteria_path = criteria_path or DEFAULT_CRITERIA_PATH
         self._companies_path = companies_path or DEFAULT_COMPANIES_PATH
+        self._voice_notes_path = voice_notes_path or DEFAULT_VOICE_NOTES_PATH
         # The checkpointer gets its OWN connection to the same file, not
         # self._conn. LangGraph's own executor can run a node body and a
         # checkpoint write on different threads within one invoke(), and
@@ -97,6 +103,9 @@ class CoreService:
             checkpointer=self._checkpointer
         )
         self._onboard = build_onboard_graph(self._conn).compile(
+            checkpointer=self._checkpointer
+        )
+        self._letter = build_letter_graph(self._conn).compile(
             checkpointer=self._checkpointer
         )
 
@@ -208,6 +217,32 @@ class CoreService:
         if row is None:
             raise ValueError("no criteria found — run onboarding first")
         return json.loads(row["data_json"])
+
+    def _latest_profile_data(self) -> dict:
+        row = self._conn.execute(
+            "SELECT data_json FROM app_profile ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            raise ValueError("no profile found — run onboarding first")
+        return json.loads(row["data_json"])
+
+    def _latest_resume_text(self) -> str:
+        row = self._conn.execute(
+            "SELECT resume_text FROM app_profile ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        return (row["resume_text"] if row else None) or ""
+
+    def _posting_jd_text(self, posting_id: str) -> str:
+        row = self._conn.execute(
+            "SELECT jd_text FROM app_posting WHERE id = ?", (posting_id,)
+        ).fetchone()
+        if row is None or not row["jd_text"]:
+            raise ValueError(f"no such Posting with JD text: {posting_id!r}")
+        return row["jd_text"]
+
+    def _read_voice_notes(self) -> str | None:
+        """Optional voice.md, folded into the Cover Letter when present (§8)."""
+        return self._voice_notes_path.read_text() if self._voice_notes_path.exists() else None
 
     def _save_onboarding_results(self, state: dict) -> None:
         profile_version = self._save_profile(state)
@@ -338,6 +373,47 @@ class CoreService:
             (posting_id, verdict, reason),
         )
         self._conn.commit()
+
+    # ---- cover letter (units 23-24) ------------------------------------
+    def draft_letter_for_posting(self, posting_id: str) -> RunHandle:
+        """On demand only (DESIGN §8) — never auto-run for the Queue.
+        Every letter stops at the outbound-letter Approval Gate before it
+        could ever enter a Package (§10, unit 28)."""
+        self._check_spend_cap()
+        run_id = uuid4().hex
+        cfg = {"configurable": {"thread_id": run_id}}
+        init = dict(
+            _LETTER_INIT,
+            posting_id=posting_id,
+            jd_text=self._posting_jd_text(posting_id),
+            resume_text=self._latest_resume_text(),
+            profile=self._latest_profile_data(),
+            voice_notes=self._read_voice_notes(),
+        )
+        self._letter.invoke(init, cfg)
+        return self._handle(self._letter, run_id)
+
+    def resume_letter(self, run_id: str, decision: str) -> RunHandle:
+        self._check_spend_cap()
+        cfg = {"configurable": {"thread_id": run_id}}
+        if not self._letter.get_state(cfg).created_at:
+            raise ValueError(f"no such run: {run_id!r}")
+        self._letter.invoke(Command(resume=decision), cfg)
+        return self._handle(self._letter, run_id)
+
+    # ---- fit notes (unit 25) --------------------------------------------
+    def get_fit_notes(self, posting_id: str) -> dict:
+        """On demand, ungated, unpersisted — DESIGN §8's Digest/Telegram
+        delivery surfaces don't exist yet (units 40-41); this ships
+        dormant until then, same precedent as unit 18's cross-source
+        dedupe tie-break shipping before a second live Source existed."""
+        self._check_spend_cap()
+        jd_text = self._posting_jd_text(posting_id)
+        notes, rows = spend.run_and_track(
+            generate_fit_notes, jd_text, self._latest_resume_text()
+        )
+        spend.log_spend(self._conn, f"fit_notes:{posting_id}", "fit_notes", rows)
+        return notes.model_dump()
 
     # ---- lifecycle --------------------------------------------------
     def close(self) -> None:

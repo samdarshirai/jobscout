@@ -262,6 +262,69 @@ def test_record_verdict_rejects_unknown_verdict(tmp_path):
     svc.close()
 
 
+def _seed_posting_and_score(svc, posting_id, company, title, score, run_id="r1"):
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title) VALUES (?, 'arbeitnow', ?, ?)",
+        (posting_id, company, title),
+    )
+    svc._conn.execute(
+        "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json) "
+        "VALUES (?, ?, ?, 'why', '[]')",
+        (posting_id, run_id, score),
+    )
+    svc._conn.commit()
+
+
+def test_get_queue_sorts_by_score_descending(tmp_path):
+    svc = _svc(tmp_path)
+    _seed_posting_and_score(svc, "p1", "Acme", "Backend Engineer", 40)
+    _seed_posting_and_score(svc, "p2", "Acme", "Frontend Engineer", 90)
+
+    queue = svc.get_queue()
+
+    assert [e.posting_id for e in queue] == ["p2", "p1"]
+    svc.close()
+
+
+def test_get_queue_flags_weak_fit_below_50(tmp_path):
+    svc = _svc(tmp_path)
+    _seed_posting_and_score(svc, "p1", "Acme", "Backend Engineer", 49)
+    _seed_posting_and_score(svc, "p2", "Acme", "Frontend Engineer", 50)
+
+    queue = svc.get_queue()
+
+    assert {e.posting_id: e.weak_fit for e in queue} == {"p1": True, "p2": False}
+    svc.close()
+
+
+def test_get_queue_excludes_a_posting_with_no_score(tmp_path):
+    svc = _svc(tmp_path)
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, status, status_reason) "
+        "VALUES ('p1', 'arbeitnow', 'Acme', 'Junior Engineer', 'excluded', 'too junior')"
+    )
+    svc._conn.commit()
+
+    assert svc.get_queue() == []
+    svc.close()
+
+
+def test_get_queue_shows_only_the_latest_score_for_a_rescored_posting(tmp_path):
+    svc = _svc(tmp_path)
+    _seed_posting_and_score(svc, "p1", "Acme", "Backend Engineer", 40, run_id="r1")
+    svc._conn.execute(
+        "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json) "
+        "VALUES ('p1', 'r2', 85, 'improved', '[]')"
+    )
+    svc._conn.commit()
+
+    queue = svc.get_queue()
+
+    assert len(queue) == 1
+    assert queue[0].score == 85
+    svc.close()
+
+
 def test_run_onboarding_pauses_at_the_static_questions_gate(tmp_path, monkeypatch):
     fake_profile = ExtractedProfile(
         roles=["Senior Frontend Engineer"],

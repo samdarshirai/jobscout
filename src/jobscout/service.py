@@ -41,6 +41,19 @@ class RunHandle:
     state: dict
 
 
+@dataclass(frozen=True)
+class QueueEntry:
+    posting_id: str
+    company: str
+    title: str
+    city: str | None
+    url: str | None
+    score: int
+    weak_fit: bool  # score < 50 (§6: Weak-Fit Flag)
+    rationale: str
+    dimensions: list[dict]
+
+
 def _pending_gate(snapshot) -> object | None:
     for intr in getattr(snapshot, "interrupts", ()) or ():
         return intr.value
@@ -238,6 +251,35 @@ class CoreService:
                 ),
             )
         self._conn.commit()
+
+    # ---- queue ----------------------------------------------------------
+    def get_queue(self) -> list[QueueEntry]:
+        """Every Posting passing its Knockouts, sorted by Score (§6). A
+        Posting the Knockout node excluded never got a Score, so the join
+        alone leaves it out — nothing here is ever auto-dropped, and a
+        rescored Posting shows only its latest Score, not one row per Run."""
+        rows = self._conn.execute(
+            "SELECT p.id, p.company, p.title, p.city, p.url, "
+            "s.score, s.rationale, s.dimensions_json "
+            "FROM app_posting p "
+            "JOIN app_score s ON s.id = "
+            "  (SELECT MAX(id) FROM app_score WHERE posting_id = p.id) "
+            "ORDER BY s.score DESC"
+        ).fetchall()
+        return [
+            QueueEntry(
+                posting_id=r["id"],
+                company=r["company"],
+                title=r["title"],
+                city=r["city"],
+                url=r["url"],
+                score=r["score"],
+                weak_fit=r["score"] < 50,
+                rationale=r["rationale"],
+                dimensions=json.loads(r["dimensions_json"]) if r["dimensions_json"] else [],
+            )
+            for r in rows
+        ]
 
     # ---- verdict ------------------------------------------------------
     def record_verdict(

@@ -151,6 +151,35 @@ def test_resume_onboarding_completes_and_persists_merged_profile(tmp_path, monke
     svc.close()
 
 
+def test_resume_onboarding_after_completion_is_a_harmless_no_op(tmp_path, monkeypatch):
+    fake_profile = ExtractedProfile(
+        roles=["Senior Frontend Engineer"],
+        years_experience=6.0,
+        stack=["React"],
+        seniority_signals=["Led a team of 4 engineers"],
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.parse_profile", lambda resume_text: fake_profile
+    )
+    monkeypatch.setattr(
+        "jobscout.graph.onboard.generate_dynamic_questions",
+        lambda resume_text, static_answers: ["Vue ok?"],
+    )
+    svc = _svc(tmp_path)
+    svc.run_onboarding(str(FIXTURE))
+    svc.resume_onboarding({"work_mode": "remote"})
+    first = svc.resume_onboarding({"Vue ok?": "yes"})
+
+    again = svc.resume_onboarding({"Vue ok?": "yes"})
+
+    assert again.status == "completed"
+    assert again.state == first.state
+
+    rows = svc._conn.execute("SELECT version FROM app_profile").fetchall()
+    assert len(rows) == 1
+    svc.close()
+
+
 def test_resume_onboarding_rejects_when_no_run_in_progress(tmp_path):
     svc = _svc(tmp_path)
     with pytest.raises(ValueError, match="no onboarding run"):

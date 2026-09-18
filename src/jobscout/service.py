@@ -97,8 +97,11 @@ class CoreService:
 
     def resume_onboarding(self, decision: object) -> RunHandle:
         cfg = {"configurable": {"thread_id": _ONBOARD_THREAD}}
-        if not self._onboard.get_state(cfg).created_at:
+        snap = self._onboard.get_state(cfg)
+        if not snap.created_at:
             raise ValueError("no onboarding run in progress")
+        if not snap.next:  # already completed — nothing to resume, no-op
+            return self._handle(self._onboard, _ONBOARD_THREAD)
         self._onboard.invoke(Command(resume=decision), cfg)
         handle = self._handle(self._onboard, _ONBOARD_THREAD)
         if handle.status == "completed":

@@ -64,6 +64,26 @@ _MIXED_JD_POSTINGS = [
         "jd_text": "",
     },
 ]
+_CROSS_SOURCE_POSTINGS = [
+    {
+        "id": "ats:Acme:acme:1",
+        "source": "ats:Acme",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/1",
+        "jd_text": "JD via ATS",
+    },
+    {
+        "id": "adzuna:42",
+        "source": "adzuna",
+        "company": "Acme",
+        "title": "Engineer",
+        "city": "Berlin",
+        "url": "https://example.com/2",
+        "jd_text": "JD via Adzuna",
+    },
+]
 
 
 def _compile(build_fn, tmp_path):
@@ -135,6 +155,40 @@ def test_poll_graph_drops_postings_with_no_jd_text(tmp_path, monkeypatch):
     graph.invoke(Command(resume="approve"), cfg)
     state = graph.get_state(cfg)
     assert state.values["postings"] == [_MIXED_JD_POSTINGS[0]]
+    conn.close()
+
+
+def test_poll_graph_collapses_a_cross_source_duplicate_when_tie_break_says_same(
+    tmp_path, monkeypatch
+):
+    _stub_search_plan(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _CROSS_SOURCE_POSTINGS
+    )
+    monkeypatch.setattr("jobscout.graph.poll.same_posting_cached", lambda conn, a, b: True)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r12"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    assert state.values["postings"] == [_CROSS_SOURCE_POSTINGS[0]]
+    conn.close()
+
+
+def test_poll_graph_keeps_a_cross_source_pair_when_tie_break_says_not_same(
+    tmp_path, monkeypatch
+):
+    _stub_search_plan(monkeypatch)
+    monkeypatch.setattr(
+        "jobscout.graph.poll.discover_curated_ats", lambda conn, path: _CROSS_SOURCE_POSTINGS
+    )
+    monkeypatch.setattr("jobscout.graph.poll.same_posting_cached", lambda conn, a, b: False)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    cfg = {"configurable": {"thread_id": "r13"}}
+    graph.invoke(POLL_INIT, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    assert state.values["postings"] == _CROSS_SOURCE_POSTINGS
     conn.close()
 
 

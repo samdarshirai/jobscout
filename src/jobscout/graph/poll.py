@@ -15,6 +15,7 @@ from langgraph.types import interrupt
 
 from jobscout import spend
 from jobscout.criteria import KnockoutRule
+from jobscout.dedupe import same_posting_cached
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.discovery.curated_ats import discover_curated_ats
 from jobscout.knockout import decide_knockout, extract_knockout_facts
@@ -42,14 +43,8 @@ def _after_gate(state: PollState) -> str:
     return "discover" if state["decision"] == "approve" else END
 
 
-def dedupe(state: PollState) -> dict:
-    """Exact-key dedupe only (DESIGN §11) — a same-id Posting discovered
-    twice in one batch collapses to its first occurrence. Cross-Source
-    fuzzy matching (same job, different id) is unit 17's cached LLM call."""
-    seen: dict[str, dict] = {}
-    for posting in state["postings"]:
-        seen.setdefault(posting["id"], posting)
-    return {"postings": list(seen.values())}
+def _normalize(text: str) -> str:
+    return text.strip().lower()
 
 
 def fetch_jd(state: PollState) -> dict:
@@ -82,6 +77,37 @@ def build_poll_graph(
     def discover(state: PollState) -> dict:
         # ponytail: Curated ATS Boards only. Units 21-22 add Adzuna/arbeitnow.
         return {"postings": discover_curated_ats(conn, companies_path)}
+
+    def dedupe(state: PollState, config: RunnableConfig) -> dict:
+        """Exact-key dedupe first (DESIGN §11) — a same-id Posting
+        discovered twice in one batch collapses to its first occurrence.
+        Then a company+title collision with *different* keys (same job via
+        two Sources — units 21-22) gets one cached LLM tie-break call per
+        pair (build-plan unit 18); no fuzzy-match thresholds."""
+        seen: dict[str, dict] = {}
+        for posting in state["postings"]:
+            seen.setdefault(posting["id"], posting)
+        by_company_title: dict[tuple[str, str], list[dict]] = {}
+        for posting in seen.values():
+            key = (_normalize(posting["company"]), _normalize(posting["title"]))
+            by_company_title.setdefault(key, []).append(posting)
+
+        run_id = config["configurable"]["thread_id"]
+
+        def _run_tie_breaks() -> list[dict]:
+            result = []
+            for group in by_company_title.values():
+                kept: list[dict] = []
+                for candidate in group:
+                    if any(same_posting_cached(conn, candidate, k) for k in kept):
+                        continue
+                    kept.append(candidate)
+                result.extend(kept)
+            return result
+
+        deduped, rows = spend.run_and_track(_run_tie_breaks)
+        spend.log_spend(conn, run_id, "dedupe", rows)
+        return {"postings": deduped}
 
     def knockout(state: PollState, config: RunnableConfig) -> dict:
         """An LLM extracts the fact, a rule decides, per Knockout axis (§6).

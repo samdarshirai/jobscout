@@ -112,6 +112,16 @@ CREATE TABLE IF NOT EXISTS app_criteria (
     created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- CONTEXT: cross-source dedupe tie-break cache — "same posting? y/n" is
+-- asked at most once per pair, cached forever (§11, build-plan unit 18).
+CREATE TABLE IF NOT EXISTS app_dedupe_cache (
+    key_a       TEXT NOT NULL,
+    key_b       TEXT NOT NULL,
+    same        INTEGER NOT NULL,  -- 0 | 1
+    checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (key_a, key_b)
+);
+
 -- CONTEXT: Preference Summary — LLM prose from accumulated Verdicts, versioned (§7).
 CREATE TABLE IF NOT EXISTS app_preference_summary (
     version                 INTEGER PRIMARY KEY,

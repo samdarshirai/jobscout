@@ -7,7 +7,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 DEFAULT_DB_PATH = Path("data/jobscout.sqlite")
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # bumped for app_dedupe_cache (build-plan unit 18)
 
 
 def get_connection(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:

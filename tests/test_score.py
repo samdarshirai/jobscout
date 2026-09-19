@@ -148,6 +148,78 @@ def test_score_postings_skips_a_posting_whose_content_hash_is_unchanged(tmp_path
     conn.close()
 
 
+def test_score_postings_marks_a_posting_error_when_scoring_raises(tmp_path, monkeypatch):
+    import sqlite3
+
+    from jobscout.storage.db import init_db
+
+    def _boom(posting, scored, resume_text, companies, conn):
+        raise ValueError("malformed JD")
+
+    monkeypatch.setattr("jobscout.score.score_posting", _boom)
+    conn = sqlite3.connect(tmp_path / "j.sqlite")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    conn.commit()
+    postings = [{"id": "p1", "jd_text": "JD", "content_hash": "hash-v1"}]
+    [result] = score_postings(postings, {"scored": _SCORED}, conn, tmp_path / "companies.yaml")
+    assert result["status"] == "error"
+    assert result["status_reason"] == "malformed JD"
+    assert result["error_count"] == 1
+    conn.close()
+
+
+def test_score_postings_marks_a_posting_dead_after_three_consecutive_errors(tmp_path, monkeypatch):
+    import sqlite3
+
+    from jobscout.storage.db import init_db
+
+    def _boom(posting, scored, resume_text, companies, conn):
+        raise ValueError("model 500")
+
+    monkeypatch.setattr("jobscout.score.score_posting", _boom)
+    conn = sqlite3.connect(tmp_path / "j.sqlite")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, error_count) "
+        "VALUES ('p1', 'arbeitnow', 'Acme', 'Engineer', 2)"
+    )
+    conn.commit()
+    postings = [{"id": "p1", "jd_text": "JD", "content_hash": "hash-v1"}]
+    [result] = score_postings(postings, {"scored": _SCORED}, conn, tmp_path / "companies.yaml")
+    assert result["status"] == "dead"
+    assert result["error_count"] == 3
+    conn.close()
+
+
+def test_score_postings_still_scores_other_postings_when_one_errors(tmp_path, monkeypatch):
+    import sqlite3
+
+    from jobscout.storage.db import init_db
+
+    def _flaky(posting, scored, resume_text, companies, conn):
+        if posting["id"] == "bad":
+            raise ValueError("malformed JD")
+        return {"score": 80, "rationale": "great fit", "dimensions": [], "content_hash": None}
+
+    monkeypatch.setattr("jobscout.score.score_posting", _flaky)
+    conn = sqlite3.connect(tmp_path / "j.sqlite")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    conn.commit()
+    postings = [
+        {"id": "bad", "jd_text": "JD", "content_hash": "h1"},
+        {"id": "good", "jd_text": "JD", "content_hash": "h2"},
+    ]
+    results = score_postings(postings, {"scored": _SCORED}, conn, tmp_path / "companies.yaml")
+    by_id = {r["id"]: r for r in results}
+    assert by_id["bad"]["status"] == "error"
+    assert by_id["good"]["status"] == "scored"
+    assert by_id["good"]["score"] == 80
+    conn.close()
+
+
 def test_score_postings_rescores_a_posting_whose_content_hash_changed(tmp_path, monkeypatch):
     import sqlite3
 
@@ -175,3 +247,70 @@ def test_score_postings_rescores_a_posting_whose_content_hash_changed(tmp_path, 
     assert result["score"] == 90
     assert result["content_hash"] == "hash-v2"
     conn.close()
+
+
+# ---- Preference Feedback Loop tool gating (unit 26) -------------------------
+
+import jobscout.score as score_module
+
+
+def _tool_names(tools):
+    return {t.name for t in tools}
+
+
+def test_build_tools_default_mode_is_summary_only(monkeypatch):
+    monkeypatch.delenv("FEEDBACK_MECHANISM", raising=False)
+    tools = score_module._build_tools(None, "resume", [], "jd")
+    names = _tool_names(tools)
+    assert "preference_summary" in names
+    assert "similar_past_verdicts" not in names
+
+
+def test_build_tools_few_shot_mode_swaps_the_tool(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_MECHANISM", "few-shot")
+    tools = score_module._build_tools(None, "resume", [], "jd")
+    names = _tool_names(tools)
+    assert "similar_past_verdicts" in names
+    assert "preference_summary" not in names
+
+
+def test_build_tools_both_mode_includes_both(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_MECHANISM", "both")
+    tools = score_module._build_tools(None, "resume", [], "jd")
+    names = _tool_names(tools)
+    assert {"preference_summary", "similar_past_verdicts"} <= names
+
+
+def test_build_tools_none_mode_includes_neither(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_MECHANISM", "none")
+    tools = score_module._build_tools(None, "resume", [], "jd")
+    names = _tool_names(tools)
+    assert "preference_summary" not in names
+    assert "similar_past_verdicts" not in names
+
+
+def test_build_tools_falls_back_to_summary_on_an_unknown_mode(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_MECHANISM", "bogus")
+    tools = score_module._build_tools(None, "resume", [], "jd")
+    names = _tool_names(tools)
+    assert "preference_summary" in names
+    assert "similar_past_verdicts" not in names
+
+
+def test_few_shot_verdicts_text_formats_matches(monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.score.top_k_similar_verdicts",
+        lambda conn, jd_text, k=5: [
+            {"title": "Backend Eng", "company": "Acme", "verdict": "up", "reason": "great stack", "similarity": 0.91}
+        ],
+    )
+    text = score_module._few_shot_verdicts_text(None, "jd text")
+    assert "Backend Eng" in text
+    assert "Acme" in text
+    assert "0.91" in text
+
+
+def test_few_shot_verdicts_text_handles_no_matches(monkeypatch):
+    monkeypatch.setattr("jobscout.score.top_k_similar_verdicts", lambda conn, jd_text, k=5: [])
+    text = score_module._few_shot_verdicts_text(None, "jd text")
+    assert "No similar past Verdicts" in text

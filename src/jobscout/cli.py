@@ -188,6 +188,27 @@ def thumb(
     console.print(f"[green]Recorded.[/green] {posting_id}: {verdict}")
 
 
+@app.command()
+def learn() -> None:
+    """Force-regenerate the Preference Summary now (§7)."""
+    try:
+        summary = get_service().learn()
+    except spend.SpendCapExceeded as e:
+        _fail(str(e))
+    console.print(f"[green]Preference Summary regenerated:[/green]\n{summary}")
+
+
+@app.command()
+def rescore() -> None:
+    """Force re-score every current Posting in the Queue (§7) — no
+    retroactive re-scoring happens unless you ask for it here."""
+    try:
+        count = get_service().rescore()
+    except spend.SpendCapExceeded as e:
+        _fail(str(e))
+    console.print(f"[green]Rescored {count} Posting(s).[/green]")
+
+
 def run() -> None:
     app()
 

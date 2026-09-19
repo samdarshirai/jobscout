@@ -370,6 +370,56 @@ def test_poll_graph_never_scores_a_posting_excluded_by_a_knockout(tmp_path, monk
     conn.close()
 
 
+def test_poll_graph_marks_a_posting_error_when_knockout_extraction_raises(tmp_path, monkeypatch):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+
+    def _boom(jd_text, rules):
+        raise ValueError("malformed JD")
+
+    monkeypatch.setattr("jobscout.graph.poll.extract_knockout_facts", _boom)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    conn.commit()
+    cfg = {"configurable": {"thread_id": "r20"}}
+    init = {**POLL_INIT, "criteria": {"knockout": [{"axis": "german_required", "rule": "B2 max"}]}}
+    graph.invoke(init, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    [posting] = state.values["postings"]
+    assert posting["status"] == "error"
+    assert posting["status_reason"] == "malformed JD"
+    assert posting["error_count"] == 1
+    conn.close()
+
+
+def test_poll_graph_marks_a_posting_dead_after_three_consecutive_knockout_errors(
+    tmp_path, monkeypatch
+):
+    _stub_search_plan(monkeypatch)
+    _stub_discovery(monkeypatch)
+
+    def _boom(jd_text, rules):
+        raise ValueError("model 500")
+
+    monkeypatch.setattr("jobscout.graph.poll.extract_knockout_facts", _boom)
+    graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)
+    conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, error_count) "
+        "VALUES (?, 'ats:Acme', 'Acme', 'Engineer', 2)",
+        (_FAKE_POSTINGS[0]["id"],),
+    )
+    conn.commit()
+    cfg = {"configurable": {"thread_id": "r21"}}
+    init = {**POLL_INIT, "criteria": {"knockout": [{"axis": "german_required", "rule": "B2 max"}]}}
+    graph.invoke(init, cfg)
+    graph.invoke(Command(resume="approve"), cfg)
+    state = graph.get_state(cfg)
+    [posting] = state.values["postings"]
+    assert posting["status"] == "dead"
+    assert posting["error_count"] == 3
+    conn.close()
+
+
 def test_poll_graph_reject_routes_straight_to_end(tmp_path, monkeypatch):
     _stub_search_plan(monkeypatch)
     graph, conn = _compile(lambda conn: build_poll_graph(conn), tmp_path)

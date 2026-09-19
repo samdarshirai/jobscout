@@ -15,6 +15,8 @@ class _FakeService:
         self.next_handle = None
         self.queue = []
         self.total = 0.0
+        self.summary = ""
+        self.rescored_count = 0
 
     def trigger_run(self):
         return self.next_handle
@@ -44,6 +46,14 @@ class _FakeService:
         if verdict not in ("up", "down"):
             raise ValueError(f"verdict must be one of ('up', 'down'), got {verdict!r}")
         self.calls.append(("record_verdict", posting_id, verdict, reason))
+
+    def learn(self):
+        self.calls.append(("learn",))
+        return self.summary
+
+    def rescore(self):
+        self.calls.append(("rescore",))
+        return self.rescored_count
 
 
 def _install_fake(monkeypatch, tmp_path):
@@ -148,3 +158,21 @@ def test_thumb_rejects_an_invalid_verdict(monkeypatch, tmp_path):
     _install_fake(monkeypatch, tmp_path)
     result = runner.invoke(app, ["thumb", "p1", "maybe"])
     assert result.exit_code != 0
+
+
+def test_learn_regenerates_the_preference_summary(monkeypatch, tmp_path):
+    fake = _install_fake(monkeypatch, tmp_path)
+    fake.summary = "likes React, dislikes on-call"
+    result = runner.invoke(app, ["learn"])
+    assert result.exit_code == 0
+    assert fake.calls == [("learn",)]
+    assert "likes React, dislikes on-call" in result.output
+
+
+def test_rescore_reports_how_many_postings_were_rescored(monkeypatch, tmp_path):
+    fake = _install_fake(monkeypatch, tmp_path)
+    fake.rescored_count = 3
+    result = runner.invoke(app, ["rescore"])
+    assert result.exit_code == 0
+    assert fake.calls == [("rescore",)]
+    assert "3" in result.output

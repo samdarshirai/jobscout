@@ -17,13 +17,17 @@ from uuid import uuid4
 
 from langgraph.types import Command
 
+from jobscout import preference, spend
+from jobscout.answer_sheet import generate_answer_sheet
 from jobscout.criteria import Criteria, DEFAULT_CRITERIA_PATH, read_criteria_file, write_criteria_file
-from jobscout import spend
-from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
+from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH, load_companies
 from jobscout.fit_notes import generate_fit_notes
 from jobscout.graph.letter import build_letter_graph
 from jobscout.graph.onboard import build_onboard_graph
 from jobscout.graph.poll import build_poll_graph
+from jobscout.graph.scope_expansion import build_scope_expansion_graph
+from jobscout.score import score_posting
+from jobscout.scope_expansion import is_suppressed, trigger_met
 from jobscout.storage.db import (
     DEFAULT_DB_PATH,
     get_checkpointer,
@@ -36,6 +40,7 @@ _VERDICTS = ("up", "down")
 _POLL_INIT = {"criteria": {}, "search_plan": {}, "decision": "", "postings": []}
 _ONBOARD_THREAD = "onboard"
 _LETTER_INIT = {"draft": {}, "decision": "", "faithfulness": {}}
+_SCOPE_EXPANSION_INIT = {"proposal": {}, "decision": ""}
 DEFAULT_VOICE_NOTES_PATH = Path("voice.md")  # optional, DESIGN §8
 
 
@@ -108,6 +113,9 @@ class CoreService:
         self._letter = build_letter_graph(self._conn).compile(
             checkpointer=self._checkpointer
         )
+        self._scope_expansion = build_scope_expansion_graph(self._conn).compile(
+            checkpointer=self._checkpointer
+        )
 
     def total_spend(self) -> float:
         return spend.total_spend(self._conn)
@@ -140,7 +148,22 @@ class CoreService:
             postings = handle.state.get("postings", [])
             self._save_discovered_postings(postings)
             self._save_scores(run_id, postings)
+            self._save_poll_run(run_id, postings)
         return handle
+
+    def _save_poll_run(self, run_id: str, postings: list[dict]) -> None:
+        """Feeds the Scope Expansion trigger (§10 unit 27): 3 consecutive
+        Polls under 2 Postings passing Knockouts. A Posting that errored or
+        died this Poll didn't reach a real pass/fail Knockout decision, so
+        it doesn't count as passing either."""
+        passed = sum(
+            1 for p in postings if p.get("status") not in ("excluded", "error", "dead")
+        )
+        self._conn.execute(
+            "INSERT INTO app_poll_run (run_id, passed_knockout_count) VALUES (?, ?)",
+            (run_id, passed),
+        )
+        self._conn.commit()
 
     def run_onboarding(self, resume_path: str | None = None) -> RunHandle:
         self._check_spend_cap()
@@ -288,17 +311,28 @@ class CoreService:
         # unit 19: every Posting here was seen in this Poll, so its
         # consecutive-miss streak resets — this is also how a Posting that
         # went briefly stale un-stales on reappearing (§11).
+        # unit 30: error_count is NOT force-reset like missed_polls — a
+        # posting the knockout/score node marked error/dead carries its own
+        # incremented error_count in its dict; one that processed cleanly
+        # carries no error_count key at all, defaulting to 0 here, which is
+        # exactly how it resets on a clean Poll after a prior error.
         for p in postings:
-            row = {"status": "new", "status_reason": None, "content_hash": None, **p}
+            row = {
+                "status": "new",
+                "status_reason": None,
+                "content_hash": None,
+                "error_count": 0,
+                **p,
+            }
             self._conn.execute(
                 "INSERT INTO app_posting "
                 "(id, source, company, title, city, url, jd_text, status, status_reason, "
-                "missed_polls, content_hash) "
+                "missed_polls, content_hash, error_count) "
                 "VALUES (:id, :source, :company, :title, :city, :url, :jd_text, :status, "
-                ":status_reason, 0, :content_hash) "
+                ":status_reason, 0, :content_hash, :error_count) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "last_seen_at = datetime('now'), status = :status, status_reason = :status_reason, "
-                "missed_polls = 0, content_hash = :content_hash",
+                "missed_polls = 0, content_hash = :content_hash, error_count = :error_count",
                 row,
             )
         self._conn.commit()
@@ -366,11 +400,19 @@ class CoreService:
             raise ValueError(
                 f"verdict must be one of {_VERDICTS}, got {verdict!r}"
             )
-        # Single statement + commit — see Global Constraints.
+        # unit 26: embed the Posting's JD text so the Few-Shot Store can
+        # later find "past Verdicts on postings similar to THIS one" by
+        # cosine similarity (preference.top_k_similar_verdicts) — NULL when
+        # the Posting has no JD text on file (defensive, shouldn't happen
+        # for anything that reached her Queue).
+        jd_row = self._conn.execute(
+            "SELECT jd_text FROM app_posting WHERE id = ?", (posting_id,)
+        ).fetchone()
+        embedding = preference.embed(jd_row["jd_text"]) if jd_row and jd_row["jd_text"] else None
         self._conn.execute(
-            "INSERT INTO app_feedback (posting_id, verdict, reason) "
-            "VALUES (?, ?, ?)",
-            (posting_id, verdict, reason),
+            "INSERT INTO app_feedback (posting_id, verdict, reason, embedding) "
+            "VALUES (?, ?, ?, ?)",
+            (posting_id, verdict, reason, embedding),
         )
         self._conn.commit()
 
@@ -414,6 +456,213 @@ class CoreService:
         )
         spend.log_spend(self._conn, f"fit_notes:{posting_id}", "fit_notes", rows)
         return notes.model_dump()
+
+    # ---- preference feedback loop (unit 26) ------------------------------
+    def learn(self) -> str:
+        """`jobscout learn` (§7): force-regenerate the Preference Summary
+        now, regardless of the every-5-new-Verdicts cadence."""
+        self._check_spend_cap()
+        summary, rows = spend.run_and_track(preference.generate_preference_summary, self._conn)
+        spend.log_spend(self._conn, "learn", "generate_preference_summary", rows)
+        preference.record_preference_summary(self._conn, summary)
+        return summary
+
+    def rescore(self) -> int:
+        """`jobscout rescore` (§7): "no retroactive re-scoring of the
+        existing queue unless asked" — this is that ask. Force re-scores
+        every current, non-terminal Posting against the latest Criteria +
+        Preference Feedback Loop context, bypassing unit 20's
+        content-hash skip (a deliberate re-score, not a routine Poll)."""
+        self._check_spend_cap()
+        scored_dims = self._latest_criteria_data().get("scored", [])
+        if not scored_dims:
+            return 0
+        resume_text = self._latest_resume_text()
+        companies = load_companies(self._companies_path)
+        (criteria_version,) = self._conn.execute(
+            "SELECT MAX(version) FROM app_criteria"
+        ).fetchone()
+        rows = self._conn.execute(
+            "SELECT id, jd_text, content_hash FROM app_posting "
+            "WHERE status NOT IN ('excluded', 'stale', 'dead', 'error') "
+            "AND jd_text IS NOT NULL"
+        ).fetchall()
+        run_id = f"rescore:{uuid4().hex}"
+        for r in rows:
+            posting = {"id": r["id"], "jd_text": r["jd_text"], "content_hash": r["content_hash"]}
+            result, spend_rows = spend.run_and_track(
+                score_posting, posting, scored_dims, resume_text, companies, self._conn
+            )
+            spend.log_spend(self._conn, run_id, "rescore", spend_rows)
+            self._conn.execute(
+                "INSERT INTO app_score "
+                "(posting_id, run_id, score, rationale, dimensions_json, criteria_version, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    r["id"],
+                    run_id,
+                    result["score"],
+                    result["rationale"],
+                    json.dumps(result["dimensions"]),
+                    criteria_version,
+                    r["content_hash"],
+                ),
+            )
+        self._conn.commit()
+        return len(rows)
+
+    # ---- scope expansion (unit 27) ---------------------------------------
+    def _recent_pass_counts(self, n: int = 3) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT passed_knockout_count FROM app_poll_run ORDER BY created_at DESC LIMIT ?",
+            (n,),
+        ).fetchall()
+        return [r["passed_knockout_count"] for r in reversed(rows)]  # oldest-first
+
+    def _recent_exclusions(self, limit: int = 20) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT title, company, status_reason FROM app_posting "
+            "WHERE status = 'excluded' ORDER BY last_seen_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _recent_scope_rejections(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT payload_json, decided_at FROM app_decision "
+            "WHERE gate = 'scope_expansion' AND outcome = 'rejected'"
+        ).fetchall()
+        out = []
+        for r in rows:
+            payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+            if payload.get("axis"):
+                out.append({"axis": payload["axis"], "decided_at": r["decided_at"]})
+        return out
+
+    def maybe_trigger_scope_expansion(self) -> RunHandle | None:
+        """DESIGN §10: 3 consecutive thin Polls -> exactly one proposed
+        Criteria change, held at its own Approval Gate. `None` when the
+        trigger isn't met, or when the resulting proposal's axis is still
+        suppressed from a rejection within the last 2 weeks — in which
+        case it's auto-rejected and never shown to her (§10)."""
+        self._check_spend_cap()
+        if not trigger_met(self._recent_pass_counts()):
+            return None
+        run_id = uuid4().hex
+        cfg = {"configurable": {"thread_id": run_id}}
+        init = dict(
+            _SCOPE_EXPANSION_INIT,
+            criteria=self._latest_criteria_data(),
+            recent_exclusions=self._recent_exclusions(),
+        )
+        self._scope_expansion.invoke(init, cfg)
+        handle = self._handle(self._scope_expansion, run_id)
+        axis = handle.state.get("proposal", {}).get("axis")
+        if axis and is_suppressed(axis, self._recent_scope_rejections()):
+            self.resume_scope_expansion(run_id, "reject")
+            return None
+        return handle
+
+    def resume_scope_expansion(self, run_id: str, decision: str) -> RunHandle:
+        self._check_spend_cap()
+        cfg = {"configurable": {"thread_id": run_id}}
+        if not self._scope_expansion.get_state(cfg).created_at:
+            raise ValueError(f"no such run: {run_id!r}")
+        self._scope_expansion.invoke(Command(resume=decision), cfg)
+        handle = self._handle(self._scope_expansion, run_id)
+        proposal = handle.state.get("proposal", {})
+        self._conn.execute(
+            "INSERT INTO app_decision (run_id, gate, outcome, payload_json) "
+            "VALUES (?, 'scope_expansion', ?, ?)",
+            (run_id, "approved" if decision == "approve" else "rejected", json.dumps(proposal)),
+        )
+        self._conn.commit()
+        if decision == "approve" and proposal.get("axis"):
+            self._apply_scope_expansion(proposal)
+        return handle
+
+    def _apply_scope_expansion(self, proposal: dict) -> None:
+        # ponytail: only rewrites a matching Knockout axis's rule text with
+        # the proposal's `change` string — DESIGN's own scope-expansion
+        # example is knockout-axis-shaped (a salary floor), and a
+        # `scored`-bucket weight change isn't something this mechanism
+        # supports yet. Add it if that ever becomes the common case.
+        row = self._latest_criteria_row()
+        criteria = json.loads(row["data_json"])
+        for rule in criteria.get("knockout", []):
+            if rule["axis"] == proposal["axis"]:
+                rule["rule"] = proposal["change"]
+                break
+        profile_version = self._conn.execute(
+            "SELECT profile_version FROM app_criteria ORDER BY version DESC LIMIT 1"
+        ).fetchone()["profile_version"]
+        (version,) = self._conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM app_criteria"
+        ).fetchone()
+        self._conn.execute(
+            "INSERT INTO app_criteria (version, data_json, profile_version) VALUES (?, ?, ?)",
+            (version, json.dumps(criteria), profile_version),
+        )
+        self._conn.commit()
+        write_criteria_file(Criteria(**criteria), self._criteria_path)
+
+    # ---- package / apply (units 28-29) -----------------------------------
+    def approve_application(self, posting_id: str, letter_run_id: str) -> dict:
+        """DESIGN §9: she approves an application -> a Package is built and
+        the Posting becomes `package_ready`. Never sets `applied` — that's
+        unit 29's job, only on her later explicit confirmation of a real
+        submission."""
+        self._check_spend_cap()
+        letter_cfg = {"configurable": {"thread_id": letter_run_id}}
+        letter_snap = self._letter.get_state(letter_cfg)
+        if not letter_snap.created_at:
+            raise ValueError(f"no such letter run: {letter_run_id!r}")
+        draft = letter_snap.values.get("draft") or {}
+        if not draft.get("body"):
+            raise ValueError(f"letter run {letter_run_id!r} has no drafted letter")
+        posting = self._conn.execute(
+            "SELECT company, url, jd_text FROM app_posting WHERE id = ?", (posting_id,)
+        ).fetchone()
+        if posting is None:
+            raise ValueError(f"no such Posting: {posting_id!r}")
+        resume_text = self._latest_resume_text()
+        answers, rows = spend.run_and_track(
+            generate_answer_sheet,
+            posting["jd_text"] or "",
+            resume_text,
+            self._latest_profile_data(),
+            posting["company"],
+        )
+        spend.log_spend(self._conn, letter_run_id, "answer_sheet", rows)
+        package = {
+            "letter": draft["body"],
+            # ponytail: the original resume PDF's path isn't retained past
+            # onboarding ingest — its extracted text is the closest thing
+            # this data model keeps; add real file retention if a Package
+            # ever needs to hand her back the actual PDF.
+            "resume_text": resume_text,
+            "jd_url": posting["url"],
+            "answer_sheet": answers.model_dump(),
+        }
+        self._conn.execute(
+            "UPDATE app_posting SET status = 'package_ready' WHERE id = ?", (posting_id,)
+        )
+        self._conn.commit()
+        return package
+
+    def mark_applied(self, posting_id: str) -> None:
+        """DESIGN §9: set ONLY by her explicit confirmation after a real
+        submission on the company site — never by Package generation."""
+        row = self._conn.execute(
+            "SELECT id FROM app_posting WHERE id = ?", (posting_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no such Posting: {posting_id!r}")
+        self._conn.execute(
+            "UPDATE app_posting SET status = 'applied', applied_at = datetime('now') WHERE id = ?",
+            (posting_id,),
+        )
+        self._conn.commit()
 
     # ---- lifecycle --------------------------------------------------
     def close(self) -> None:

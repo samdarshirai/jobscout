@@ -25,6 +25,7 @@ from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH
 from jobscout.discovery.curated_ats import discover_curated_ats
 from jobscout.discovery.fallback import fetch_page_text
 from jobscout.knockout import decide_knockout, extract_knockout_facts
+from jobscout.retry import with_retry
 from jobscout.score import score_postings
 from jobscout.search_plan import derive_search_plan
 
@@ -187,7 +188,27 @@ def build_poll_graph(
         def _run_knockout() -> list[dict]:
             updated = []
             for posting in state["postings"]:
-                facts = extract_knockout_facts(posting["jd_text"], rules)
+                # §17 / unit 30: with_retry only absorbs a 429 WITHIN this
+                # one call (intra-call backoff). A failure surviving that
+                # bumps app_posting.error_count, a SEPARATE cross-Poll
+                # counter (3 in a row -> dead) — not the same "3".
+                try:
+                    facts = with_retry(extract_knockout_facts, posting["jd_text"], rules)
+                except Exception as exc:
+                    row = conn.execute(
+                        "SELECT error_count FROM app_posting WHERE id = ?", (posting["id"],)
+                    ).fetchone()
+                    new_count = (row["error_count"] if row else 0) + 1
+                    status = "dead" if new_count >= 3 else "error"
+                    updated.append(
+                        {
+                            **posting,
+                            "status": status,
+                            "status_reason": str(exc),
+                            "error_count": new_count,
+                        }
+                    )
+                    continue
                 reason = decide_knockout(facts)
                 if reason is not None:
                     posting = {**posting, "status": "excluded", "status_reason": reason}

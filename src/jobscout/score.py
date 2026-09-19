@@ -8,6 +8,7 @@ a dimension without a *real* quoted JD line and quoted resume line caps at
 2, regardless of what the model claims.
 """
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -17,8 +18,14 @@ from pydantic import BaseModel, Field
 
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH, TargetCompany, load_companies
 from jobscout.llm import get_llm
+from jobscout.preference import top_k_similar_verdicts
+from jobscout.retry import with_retry
 
 _MAX_STEPS = 12  # "bounded" ReAct sub-agent (DESIGN §4)
+# DESIGN §7: none | few-shot | summary | both — which Preference Feedback
+# Loop mechanism(s) the Score Sub-Agent's tools expose. Default "summary"
+# per DESIGN §7 ("cheaper per call, more demoable").
+_FEEDBACK_MECHANISMS = ("none", "few-shot", "summary", "both")
 
 
 class DimensionScore(BaseModel):
@@ -108,7 +115,25 @@ def _preference_summary_text(conn: sqlite3.Connection) -> str:
     return row["summary"] if row else "No Preference Summary yet."
 
 
-def _build_tools(conn: sqlite3.Connection, resume_text: str, companies: list[TargetCompany]) -> list:
+def _few_shot_verdicts_text(conn: sqlite3.Connection, jd_text: str) -> str:
+    matches = top_k_similar_verdicts(conn, jd_text)
+    if not matches:
+        return "No similar past Verdicts on file yet."
+    return "\n".join(
+        f"{m['verdict']} on {m['title']!r} at {m['company']} "
+        f"(similarity {m['similarity']:.2f}): {m['reason'] or 'no reason given'}"
+        for m in matches
+    )
+
+
+def _feedback_mechanism() -> str:
+    mode = os.environ.get("FEEDBACK_MECHANISM", "summary")
+    return mode if mode in _FEEDBACK_MECHANISMS else "summary"
+
+
+def _build_tools(
+    conn: sqlite3.Connection, resume_text: str, companies: list[TargetCompany], jd_text: str
+) -> list:
     def read_resume() -> str:
         """Re-read the candidate's full resume text."""
         return resume_text or "No resume on file."
@@ -125,7 +150,17 @@ def _build_tools(conn: sqlite3.Connection, resume_text: str, companies: list[Tar
         """The current Preference Summary distilled from past thumbs-up/down feedback."""
         return _preference_summary_text(conn)
 
-    return [tool(read_resume), tool(company_lookup), tool(past_rejections), tool(preference_summary)]
+    def similar_past_verdicts() -> str:
+        """Past Verdicts (thumbs up/down + reason) on Postings similar to this one — the Few-Shot Store (DESIGN §7)."""
+        return _few_shot_verdicts_text(conn, jd_text)
+
+    tools = [tool(read_resume), tool(company_lookup), tool(past_rejections)]
+    mode = _feedback_mechanism()
+    if mode in ("summary", "both"):
+        tools.append(tool(preference_summary))
+    if mode in ("few-shot", "both"):
+        tools.append(tool(similar_past_verdicts))
+    return tools
 
 
 def _run_scoring_agent(jd_text: str, scored: list[dict], tools: list) -> ScoreResult:
@@ -170,7 +205,7 @@ def score_posting(
 ) -> dict:
     """Score one Posting: run the sub-agent, then apply anti-inflation
     before the weighted total (§6)."""
-    tools = _build_tools(conn, resume_text, companies)
+    tools = _build_tools(conn, resume_text, companies, posting["jd_text"])
     result = _run_scoring_agent(posting["jd_text"], scored, tools)
     dims = _cap_uncited(result.dimensions, posting["jd_text"], resume_text)
     return {
@@ -205,7 +240,22 @@ def score_postings(
         if posting.get("content_hash") == _latest_score_content_hash(conn, posting["id"]):
             updated.append({**posting, "status": "scored"})
             continue
-        result = score_posting(posting, scored, resume_text, companies, conn)
+        # §17 / unit 30: with_retry only absorbs a 429 WITHIN this one
+        # call (intra-call backoff). A failure surviving that bumps
+        # app_posting.error_count, a SEPARATE cross-Poll counter (3 in a
+        # row -> dead) — not the same "3".
+        try:
+            result = with_retry(score_posting, posting, scored, resume_text, companies, conn)
+        except Exception as exc:
+            row = conn.execute(
+                "SELECT error_count FROM app_posting WHERE id = ?", (posting["id"],)
+            ).fetchone()
+            new_count = (row["error_count"] if row else 0) + 1
+            status = "dead" if new_count >= 3 else "error"
+            updated.append(
+                {**posting, "status": status, "status_reason": str(exc), "error_count": new_count}
+            )
+            continue
         updated.append(
             {
                 **posting,

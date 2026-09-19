@@ -790,3 +790,306 @@ def test_get_service_is_a_singleton_per_path(tmp_path):
     finally:
         get_service(p).close()
         get_service.cache_clear()
+
+
+# ---- error_count persistence (unit 30) -----------------------------------
+
+_BASE_POSTING = {
+    "id": "p1", "source": "arbeitnow", "company": "Acme", "title": "Eng",
+    "city": None, "url": "https://example.com/1", "jd_text": "We need an engineer.",
+}
+
+
+def test_save_discovered_postings_persists_an_explicit_error_count(tmp_path):
+    svc = _svc(tmp_path)
+    svc._save_discovered_postings(
+        [{**_BASE_POSTING, "status": "error", "status_reason": "model 500", "error_count": 2}]
+    )
+    row = svc._conn.execute(
+        "SELECT status, status_reason, error_count FROM app_posting WHERE id = 'p1'"
+    ).fetchone()
+    assert row["status"] == "error"
+    assert row["error_count"] == 2
+    svc.close()
+
+
+def test_save_discovered_postings_resets_error_count_on_a_clean_save(tmp_path):
+    svc = _svc(tmp_path)
+    svc._save_discovered_postings(
+        [{**_BASE_POSTING, "status": "error", "status_reason": "model 500", "error_count": 1}]
+    )
+    # Same posting, second Poll, no error this time — no error_count key at all.
+    svc._save_discovered_postings([dict(_BASE_POSTING)])
+    row = svc._conn.execute("SELECT status, error_count FROM app_posting WHERE id = 'p1'").fetchone()
+    assert row["status"] == "new"
+    assert row["error_count"] == 0
+    svc.close()
+
+
+# ---- record_verdict embedding (unit 26) ------------------------------------
+
+def test_record_verdict_embeds_the_postings_jd_text(tmp_path, monkeypatch):
+    monkeypatch.setattr("jobscout.service.preference.embed", lambda text: b"fake-vector")
+    svc = _svc(tmp_path)
+    _seed_posting_with_jd(svc)
+    svc.record_verdict("ats:Acme:acme:1", "up", "great stack")
+    row = svc._conn.execute("SELECT embedding FROM app_feedback").fetchone()
+    assert row["embedding"] == b"fake-vector"
+    svc.close()
+
+
+def test_record_verdict_leaves_embedding_null_with_no_jd_text(tmp_path, monkeypatch):
+    def _boom(text):
+        raise AssertionError("embed() should not be called with no jd_text")
+    monkeypatch.setattr("jobscout.service.preference.embed", _boom)
+    svc = _svc(tmp_path)
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title) VALUES ('p1', 'arbeitnow', 'Acme', 'Eng')"
+    )
+    svc._conn.commit()
+    svc.record_verdict("p1", "down", "not a fit")
+    row = svc._conn.execute("SELECT embedding FROM app_feedback").fetchone()
+    assert row["embedding"] is None
+    svc.close()
+
+
+# ---- learn / rescore (unit 26) ---------------------------------------------
+
+def test_learn_regenerates_and_records_the_preference_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.service.preference.generate_preference_summary", lambda conn: "likes React, dislikes on-call"
+    )
+    svc = _svc(tmp_path)
+    summary = svc.learn()
+    assert summary == "likes React, dislikes on-call"
+    row = svc._conn.execute(
+        "SELECT summary, verdict_count_at_write FROM app_preference_summary ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+    assert row["summary"] == "likes React, dislikes on-call"
+    svc.close()
+
+
+def test_rescore_is_a_noop_with_no_scored_dimensions(tmp_path):
+    # Criteria the pydantic model enforces >=4 scored dimensions always —
+    # this simulates a degenerate/hand-edited row bypassing that (score.py's
+    # own score_postings guards the identical case for the same reason).
+    svc = _svc(tmp_path)
+    svc._conn.execute(
+        "INSERT INTO app_criteria (version, data_json) VALUES (1, ?)",
+        (json.dumps({"knockout": [], "scored": [], "learn": []}),),
+    )
+    svc._conn.commit()
+    assert svc.rescore() == 0
+    svc.close()
+
+
+def test_rescore_rescoring_current_postings(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.service.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 77, "rationale": "still a fit", "dimensions": [], "content_hash": posting.get("content_hash"),
+        },
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, jd_text, status) "
+        "VALUES ('p1', 'arbeitnow', 'Acme', 'Eng', 'We need an engineer.', 'scored')"
+    )
+    svc._conn.commit()
+
+    count = svc.rescore()
+
+    assert count == 1
+    row = svc._conn.execute("SELECT score, rationale FROM app_score WHERE posting_id = 'p1'").fetchone()
+    assert row["score"] == 77
+    assert row["rationale"] == "still a fit"
+    svc.close()
+
+
+# ---- scope expansion (unit 27) ---------------------------------------------
+
+def _seed_poll_runs(svc, passed_counts):
+    for i, count in enumerate(passed_counts):
+        svc._conn.execute(
+            "INSERT INTO app_poll_run (run_id, passed_knockout_count, created_at) "
+            "VALUES (?, ?, datetime('now', ?))",
+            (f"r{i}", count, f"-{len(passed_counts) - i} hours"),
+        )
+    svc._conn.commit()
+
+
+_FAKE_PROPOSAL = {
+    "axis": "seniority_band",
+    "change": "senior or mid or junior",
+    "evidence": "4 of 5 exclusions failed only on seniority_band.",
+    "surfaced_titles": ["Junior Eng"],
+}
+
+
+class _FakeProposalResult:
+    def model_dump(self):
+        return dict(_FAKE_PROPOSAL)
+
+
+def test_maybe_trigger_scope_expansion_returns_none_when_trigger_not_met(tmp_path):
+    svc = _svc(tmp_path)
+    assert svc.maybe_trigger_scope_expansion() is None
+    svc.close()
+
+
+def test_maybe_trigger_scope_expansion_pauses_at_gate_when_triggered(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.scope_expansion.propose_scope_expansion",
+        lambda criteria, recent_exclusions: _FakeProposalResult(),
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    _seed_poll_runs(svc, [1, 0, 1])
+
+    handle = svc.maybe_trigger_scope_expansion()
+
+    assert handle is not None
+    assert handle.status == "paused"
+    assert handle.pending_gate["gate"] == "scope_expansion"
+    assert handle.state["proposal"] == _FAKE_PROPOSAL
+    svc.close()
+
+
+def test_maybe_trigger_scope_expansion_auto_rejects_when_suppressed(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.scope_expansion.propose_scope_expansion",
+        lambda criteria, recent_exclusions: _FakeProposalResult(),
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    _seed_poll_runs(svc, [1, 0, 1])
+    svc._conn.execute(
+        "INSERT INTO app_decision (gate, outcome, payload_json) "
+        "VALUES ('scope_expansion', 'rejected', ?)",
+        (json.dumps({"axis": "seniority_band"}),),
+    )
+    svc._conn.commit()
+
+    handle = svc.maybe_trigger_scope_expansion()
+
+    assert handle is None
+    svc.close()
+
+
+def test_resume_scope_expansion_approve_bumps_criteria_and_rewrites_the_matching_rule(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.scope_expansion.propose_scope_expansion",
+        lambda criteria, recent_exclusions: _FakeProposalResult(),
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    _seed_poll_runs(svc, [1, 0, 1])
+    handle = svc.maybe_trigger_scope_expansion()
+
+    done = svc.resume_scope_expansion(handle.run_id, "approve")
+
+    assert done.status == "completed"
+    (new_version,) = svc._conn.execute("SELECT MAX(version) FROM app_criteria").fetchone()
+    assert new_version == 2
+    data = json.loads(
+        svc._conn.execute(
+            "SELECT data_json FROM app_criteria WHERE version = ?", (new_version,)
+        ).fetchone()["data_json"]
+    )
+    rule = next(r for r in data["knockout"] if r["axis"] == "seniority_band")
+    assert rule["rule"] == _FAKE_PROPOSAL["change"]
+    decision_row = svc._conn.execute(
+        "SELECT outcome FROM app_decision WHERE gate = 'scope_expansion'"
+    ).fetchone()
+    assert decision_row["outcome"] == "approved"
+    svc.close()
+
+
+def test_resume_scope_expansion_reject_does_not_touch_criteria(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.scope_expansion.propose_scope_expansion",
+        lambda criteria, recent_exclusions: _FakeProposalResult(),
+    )
+    svc = _svc(tmp_path)
+    _seed_criteria(svc)
+    _seed_poll_runs(svc, [1, 0, 1])
+    handle = svc.maybe_trigger_scope_expansion()
+
+    svc.resume_scope_expansion(handle.run_id, "reject")
+
+    (version,) = svc._conn.execute("SELECT MAX(version) FROM app_criteria").fetchone()
+    assert version == 1
+    decision_row = svc._conn.execute(
+        "SELECT outcome FROM app_decision WHERE gate = 'scope_expansion'"
+    ).fetchone()
+    assert decision_row["outcome"] == "rejected"
+    svc.close()
+
+
+# ---- package / apply (units 28-29) -----------------------------------------
+
+def test_approve_application_builds_a_package_and_sets_package_ready(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.graph.letter.draft_letter",
+        lambda jd_text, resume_text, profile, voice_notes: type(
+            "D", (), {"model_dump": lambda self: {"body": "Dear team...", "language": "english", "flag": None}}
+        )(),
+    )
+    monkeypatch.setattr(
+        "jobscout.service.generate_answer_sheet",
+        lambda jd_text, resume_text, profile, company: type(
+            "A",
+            (),
+            {"model_dump": lambda self: {
+                "visa_status": "Not on file — please fill in before sending.",
+                "notice_period": "Not on file — please fill in before sending.",
+                "salary_expectation": "€70000+",
+                "why_this_company": "Great mission fit.",
+            }},
+        )(),
+    )
+    svc = _svc(tmp_path)
+    _seed_posting_with_jd(svc)
+    _seed_profile(svc)
+    letter_handle = svc.draft_letter_for_posting("ats:Acme:acme:1")
+
+    package = svc.approve_application("ats:Acme:acme:1", letter_handle.run_id)
+
+    assert package["letter"] == "Dear team..."
+    assert package["answer_sheet"]["salary_expectation"] == "€70000+"
+    row = svc._conn.execute(
+        "SELECT status FROM app_posting WHERE id = 'ats:Acme:acme:1'"
+    ).fetchone()
+    assert row["status"] == "package_ready"
+    svc.close()
+
+
+def test_approve_application_requires_a_real_letter_run(tmp_path):
+    svc = _svc(tmp_path)
+    _seed_posting_with_jd(svc)
+    with pytest.raises(ValueError):
+        svc.approve_application("ats:Acme:acme:1", "does-not-exist")
+    svc.close()
+
+
+def test_mark_applied_sets_status_and_timestamp(tmp_path):
+    svc = _svc(tmp_path)
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title) VALUES ('p1', 'arbeitnow', 'Acme', 'Eng')"
+    )
+    svc._conn.commit()
+
+    svc.mark_applied("p1")
+
+    row = svc._conn.execute("SELECT status, applied_at FROM app_posting WHERE id = 'p1'").fetchone()
+    assert row["status"] == "applied"
+    assert row["applied_at"] is not None
+    svc.close()
+
+
+def test_mark_applied_requires_an_existing_posting(tmp_path):
+    svc = _svc(tmp_path)
+    with pytest.raises(ValueError):
+        svc.mark_applied("does-not-exist")
+    svc.close()

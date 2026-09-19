@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS app_posting (
         -- new | queued | scored | excluded | stale | error | dead | package_ready | applied | skipped (CONTEXT)
     status_reason  TEXT,
     missed_polls   INTEGER NOT NULL DEFAULT 0,  -- consecutive Polls missing from Source; 2 -> stale (§11)
+    error_count    INTEGER NOT NULL DEFAULT 0,  -- consecutive Polls ending in 'error'; 3 -> dead (§17 unit 30)
+    applied_at     TEXT,                        -- set only by the Candidate's explicit "mark applied" (§9 unit 29)
     first_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -130,4 +132,13 @@ CREATE TABLE IF NOT EXISTS app_preference_summary (
     summary                 TEXT NOT NULL,
     verdict_count_at_write  INTEGER,   -- regenerated every 5 new Verdicts (§7)
     created_at              TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-Poll Knockout-pass count, feeding the Scope Expansion trigger: 3
+-- consecutive Polls under 2 passes (§10, build-plan unit 27). One row per
+-- completed poll Run.
+CREATE TABLE IF NOT EXISTS app_poll_run (
+    run_id                TEXT PRIMARY KEY,
+    passed_knockout_count INTEGER NOT NULL,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );

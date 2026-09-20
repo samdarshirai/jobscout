@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>jobscout</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 1rem; }
+  nav { display: flex; gap: 1rem; border-bottom: 1px solid #8884; margin-bottom: 1rem; }
+  nav button { background: none; border: none; padding: 0.5rem 0; font: inherit; cursor: pointer; opacity: 0.6; }
+  nav button.active { opacity: 1; border-bottom: 2px solid currentColor; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 0.4rem; border-bottom: 1px solid #8882; vertical-align: top; }
+  button.act { font: inherit; cursor: pointer; margin-right: 0.25rem; }
+  .muted { opacity: 0.6; font-size: 0.9em; }
+  .flag { color: #d97706; font-weight: 600; }
+  .row-link { cursor: pointer; text-decoration: underline; }
+  pre { white-space: pre-wrap; }
+  #error { color: #dc2626; }
+</style>
+</head>
+<body>
+<h1>jobscout</h1>
+<div id="error"></div>
+<nav>
+  <button data-view="queue" class="active">Queue</button>
+  <button data-view="preference">Preference</button>
+  <button data-view="eval">Eval</button>
+</nav>
+<div id="view"></div>
+
+<script>
+const $ = (sel, root = document) => root.querySelector(sel);
+let currentView = "queue";
+let currentArg = null;
+let pollTimer = null;
+
+async function api(path, opts) {
+  const res = await fetch("/api" + path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", ...(opts && opts.headers) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || res.statusText);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function showError(e) { $("#error").textContent = e ? String(e.message || e) : ""; }
+
+function setView(view, arg = null) {
+  currentView = view;
+  currentArg = arg;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.view === view));
+  render();
+}
+
+async function render() {
+  showError(null);
+  try {
+    if (currentView === "queue") await renderQueue();
+    else if (currentView === "preference") await renderPreference();
+    else if (currentView === "eval") await renderEval();
+    else if (currentView === "posting") await renderPosting(currentArg);
+    else if (currentView === "run") await renderRun(currentArg);
+  } catch (e) { showError(e); }
+}
+
+function fmtCost(n) { return "$" + (n || 0).toFixed(4); }
+
+async function renderQueue() {
+  const [entries, sp] = await Promise.all([api("/queue"), api("/spend")]);
+  const rows = entries.map(e => `
+    <tr>
+      <td>${e.score}</td>
+      <td>${e.company}</td>
+      <td><span class="row-link" onclick="setView('posting','${e.posting_id}')">${e.title}</span></td>
+      <td>${[e.weak_fit ? '<span class="flag">weak fit</span>' : '', e.changed ? '<span class="flag">changed</span>' : ''].filter(Boolean).join(" ")}</td>
+      <td>
+        <button class="act" onclick="act('${e.posting_id}','up')">👍</button>
+        <button class="act" onclick="act('${e.posting_id}','down')">👎</button>
+        <button class="act" onclick="draftLetter('${e.posting_id}')">letter</button>
+        <button class="act" onclick="postAction('${e.posting_id}','skip')">skip</button>
+        <button class="act" onclick="postAction('${e.posting_id}','applied')">applied</button>
+      </td>
+    </tr>`).join("");
+  $("#view").innerHTML = `
+    <p class="muted">Spend: ${fmtCost(sp.spend_usd)} / ${fmtCost(sp.cap_usd)}
+      &nbsp; <button class="act" onclick="triggerRun()">trigger run</button></p>
+    <table><thead><tr><th>Score</th><th>Company</th><th>Title</th><th>Flags</th><th>Actions</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan=5 class="muted">Queue is empty.</td></tr>'}</tbody></table>`;
+}
+
+async function act(postingId, verdict) {
+  await api(`/postings/${postingId}/verdict`, { method: "POST", body: JSON.stringify({ verdict }) });
+  render();
+}
+async function postAction(postingId, action) {
+  await api(`/postings/${postingId}/${action}`, { method: "POST" });
+  render();
+}
+async function draftLetter(postingId) {
+  const handle = await api(`/postings/${postingId}/letter`, { method: "POST" });
+  alert(handle.status === "paused" ? "Letter drafted — paused at " + handle.pending_gate.gate + " gate (run_id " + handle.run_id + ")" : "Letter run complete.");
+  render();
+}
+async function triggerRun() {
+  const handle = await api("/runs/trigger", { method: "POST" });
+  alert(handle.status === "paused" ? "Run paused at " + handle.pending_gate.gate + " gate (run_id " + handle.run_id + ")" : "Run complete.");
+  render();
+}
+async function resumeGate(kind, runId, decision) {
+  const path = kind === "search_plan" ? `/runs/${runId}/resume` : kind === "outbound_letter" ? `/letters/${runId}/resume` : `/scope-expansion/${runId}/resume`;
+  await api(path, { method: "POST", body: JSON.stringify({ decision }) });
+  render();
+}
+
+async function renderPosting(postingId) {
+  const p = await api(`/postings/${postingId}`);
+  const dims = (p.latest && p.latest.dimensions || []).map(d => `<li>${d.dimension}: ${d.score} — <span class="muted">${d.jd_line || ''} / ${d.resume_line || ''}</span></li>`).join("");
+  const history = p.score_history.map(s => `<li>${s.created_at} — ${s.score} (run ${s.run_id})</li>`).join("");
+  const verdicts = p.verdicts.map(v => `<li>${v.created_at} — ${v.verdict}${v.reason ? ": " + v.reason : ""}</li>`).join("");
+  $("#view").innerHTML = `
+    <p><span class="row-link" onclick="setView('queue')">&larr; Queue</span></p>
+    <h2>${p.company} — ${p.title}</h2>
+    <p class="muted">${p.city || ""} &middot; <a href="${p.url}" target="_blank">${p.url || ""}</a> &middot; status: ${p.status}</p>
+    <h3>Rubric breakdown</h3><ul>${dims || '<li class="muted">none yet</li>'}</ul>
+    <h3>Score history</h3><ul>${history || '<li class="muted">none</li>'}</ul>
+    <h3>Verdicts</h3><ul>${verdicts || '<li class="muted">none</li>'}</ul>
+    <h3>JD text</h3><pre>${(p.jd_text || "").slice(0, 4000)}</pre>`;
+}
+
+async function renderRun(runId) {
+  const r = await api(`/runs/${runId}`);
+  const spendRows = r.spend.map(s => `<li>${s.created_at} — ${s.node} (${s.model || "n/a"}): ${fmtCost(s.cost_usd)}</li>`).join("");
+  const postings = r.postings.map(p => `<li><span class="row-link" onclick="setView('posting','${p.id}')">${p.company} — ${p.title}</span>: ${p.score}</li>`).join("");
+  $("#view").innerHTML = `
+    <p><span class="row-link" onclick="setView('queue')">&larr; Queue</span></p>
+    <h2>Run ${r.run_id}</h2>
+    <p>Path: ${r.path.join(" &rarr; ") || "(none)"}</p>
+    <p>Total cost: ${fmtCost(r.cost_total)}</p>
+    <h3>Per-node spend</h3><ul>${spendRows || '<li class="muted">none</li>'}</ul>
+    <h3>Postings scored</h3><ul>${postings || '<li class="muted">none</li>'}</ul>`;
+}
+
+async function renderPreference() {
+  const v = await api("/preference");
+  const history = v.history.map(h => `<li>v${h.version} (${h.created_at}, ${h.verdict_count_at_write} verdicts): ${h.summary}</li>`).join("");
+  $("#view").innerHTML = `
+    <h2>Preference Summary</h2>
+    <p>${v.current ? v.current.summary : '<span class="muted">none yet</span>'}</p>
+    <h3>Version history</h3><ul>${history || '<li class="muted">none</li>'}</ul>`;
+}
+
+async function renderEval() {
+  const v = await api("/eval");
+  const b = v.baseline;
+  const bakeOff = v.bake_off.map(c => `<tr><td>${c.model_name}</td><td>${c.mechanism}</td><td>${c.n}</td><td>${c.spearman == null ? "—" : c.spearman.toFixed(3)}</td><td>${fmtCost(c.cost_total)}</td></tr>`).join("");
+  const ablations = v.ablations.map(a => `<tr><td>${a.ablation}</td><td>${a.n}</td><td>${a.spearman == null ? "—" : a.spearman.toFixed(3)}</td><td>${a.delta == null ? "—" : a.delta.toFixed(3)}</td></tr>`).join("");
+  $("#view").innerHTML = `
+    <h2>Eval</h2>
+    <p>Spearman (n=${b.n}): <b>${b.spearman == null ? "—" : b.spearman.toFixed(3)}</b>
+       (target ${b.target}, ${b.meets_target ? "met" : "not met"})</p>
+    <p>Knockout false exclusions: ${b.knockout_false_exclusion_count}</p>
+    <h3>Bake-Off</h3>
+    <table><thead><tr><th>Model</th><th>Mechanism</th><th>n</th><th>Spearman</th><th>Cost</th></tr></thead>
+    <tbody>${bakeOff || '<tr><td colspan=5 class="muted">none run</td></tr>'}</tbody></table>
+    <h3>Ablation deltas</h3>
+    <table><thead><tr><th>Switch</th><th>n</th><th>Spearman</th><th>Delta</th></tr></thead>
+    <tbody>${ablations || '<tr><td colspan=4 class="muted">none run</td></tr>'}</tbody></table>`;
+}
+
+document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
+setView("queue");
+pollTimer = setInterval(render, 2000);  // DESIGN §12: live status via polling, not SSE
+</script>
+</body>
+</html>

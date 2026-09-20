@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from langgraph.types import Command
 
-from jobscout import preference, spend
+from jobscout import eval, preference, spend
 from jobscout.answer_sheet import generate_answer_sheet
 from jobscout.criteria import Criteria, DEFAULT_CRITERIA_PATH, read_criteria_file, write_criteria_file
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH, load_companies
@@ -462,6 +462,101 @@ class CoreService:
         )
         spend.log_spend(self._conn, f"fit_notes:{posting_id}", "fit_notes", rows)
         return notes.model_dump()
+
+    # ---- web explainer views (unit 41) -----------------------------------
+    def get_run_detail(self, run_id: str) -> dict:
+        """Run view (§12): the graph path taken + per-node cost/timing, and
+        the Postings scored under this Run. There's no separate execution-
+        trace table — `app_spend` already carries one row per node call
+        (run_id, node, cost, created_at), so its rows IN ORDER are the path
+        and their timestamps are the timing; a real step-by-step trace lives
+        in LangSmith (§14), not locally."""
+        spend_rows = [
+            dict(r) for r in self._conn.execute(
+                "SELECT node, model, prompt_tokens, completion_tokens, cost_usd, created_at "
+                "FROM app_spend WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+        ]
+        posting_rows = [
+            dict(r) for r in self._conn.execute(
+                "SELECT p.id, p.company, p.title, s.score, s.rationale "
+                "FROM app_score s JOIN app_posting p ON p.id = s.posting_id "
+                "WHERE s.run_id = ? ORDER BY s.score DESC",
+                (run_id,),
+            ).fetchall()
+        ]
+        return {
+            "run_id": run_id,
+            "path": [r["node"] for r in spend_rows],
+            "spend": spend_rows,
+            "cost_total": sum(r["cost_usd"] for r in spend_rows),
+            "postings": posting_rows,
+        }
+
+    def get_posting_detail(self, posting_id: str) -> dict:
+        """Posting view (§12): JD text, Rubric breakdown (latest Score's
+        dimensions), full Score history, and her Verdict history."""
+        posting = self._conn.execute(
+            "SELECT id, company, title, city, url, jd_text, status FROM app_posting WHERE id = ?",
+            (posting_id,),
+        ).fetchone()
+        if posting is None:
+            raise ValueError(f"no such Posting: {posting_id!r}")
+        scores = [
+            dict(r) for r in self._conn.execute(
+                "SELECT run_id, score, rationale, dimensions_json, created_at "
+                "FROM app_score WHERE posting_id = ? ORDER BY id",
+                (posting_id,),
+            ).fetchall()
+        ]
+        for s in scores:
+            s["dimensions"] = json.loads(s.pop("dimensions_json")) if s["dimensions_json"] else []
+        verdicts = [
+            dict(r) for r in self._conn.execute(
+                "SELECT verdict, reason, created_at FROM app_feedback "
+                "WHERE posting_id = ? ORDER BY id",
+                (posting_id,),
+            ).fetchall()
+        ]
+        return {
+            **dict(posting),
+            "score_history": scores,
+            "latest": scores[-1] if scores else None,
+            "verdicts": verdicts,
+        }
+
+    def get_preference_view(self) -> dict:
+        """Preference view (§12): current summary + version history."""
+        rows = [
+            dict(r) for r in self._conn.execute(
+                "SELECT version, summary, verdict_count_at_write, created_at "
+                "FROM app_preference_summary ORDER BY version"
+            ).fetchall()
+        ]
+        return {"current": rows[-1] if rows else None, "history": rows}
+
+    def get_eval_view(self) -> dict:
+        """Eval view (§12): Bake-Off table, Spearman numbers, ablation
+        deltas — all reconstructed read-only from `app_score`/`app_spend`
+        by `eval.py`'s unit-39 FINDINGS helpers, no re-scoring.
+
+        `seed_set_eval` needs >=2 labelled Postings to correlate (unit 15
+        eval.py) -- a real gap before unit 32's labelling has run, or in a
+        fresh demo checkout with no Seed Set loaded. The view degrades to
+        an empty baseline rather than 500ing on a page load."""
+        try:
+            baseline = eval.seed_set_eval(self._conn)
+        except ValueError:
+            baseline = {
+                "n": 0, "spearman": None, "target": eval.TARGET_SPEARMAN, "meets_target": False,
+                "knockout_false_exclusions": [], "knockout_false_exclusion_count": 0,
+            }
+        return {
+            "baseline": baseline,
+            "bake_off": eval.bake_off_table_from_db(self._conn),
+            "ablations": eval.ablation_deltas_from_db(self._conn, baseline["spearman"]),
+        }
 
     # ---- preference feedback loop (unit 26) ------------------------------
     def learn(self) -> str:

@@ -35,6 +35,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 let currentView = "queue";
 let currentArg = null;
 let pollTimer = null;
+let pendingGate = null;  // {run_id, gate, ...payload} — surfaced as an Approve/Reject banner
 
 async function api(path, opts) {
   const res = await fetch("/api" + path, {
@@ -89,8 +90,40 @@ async function renderQueue() {
   $("#view").innerHTML = `
     <p class="muted">Spend: ${fmtCost(sp.spend_usd)} / ${fmtCost(sp.cap_usd)}
       &nbsp; <button class="act" onclick="triggerRun()">trigger run</button></p>
+    ${renderGateBanner()}
     <table><thead><tr><th>Score</th><th>Company</th><th>Title</th><th>Flags</th><th>Actions</th></tr></thead>
     <tbody>${rows || '<tr><td colspan=5 class="muted">Queue is empty.</td></tr>'}</tbody></table>`;
+}
+
+const _GATE_LABELS = { search_plan: "Search Plan", outbound_letter: "Cover Letter", scope_expansion: "Scope Expansion" };
+
+function _gateBody(gate) {
+  if (gate.gate === "search_plan") return (gate.plan.queries || []).map(q => `<li>${q}</li>`).join("");
+  if (gate.gate === "outbound_letter") return `<pre>${gate.draft.body || ""}</pre>`;
+  return `<p>${gate.proposal.axis}: ${gate.proposal.change}<br><span class="muted">${gate.proposal.evidence || ""}</span></p>`;
+}
+
+function renderGateBanner() {
+  if (!pendingGate) return "";
+  const g = pendingGate;
+  return `
+    <div style="border:1px solid #d97706; border-radius:6px; padding:0.75rem; margin-bottom:1rem;">
+      <b>${_GATE_LABELS[g.gate] || g.gate} needs your approval</b> (run ${g.run_id})
+      <ul>${_gateBody(g)}</ul>
+      <button class="act" onclick="decideGate('approve')">Approve</button>
+      <button class="act" onclick="decideGate('reject')">Reject</button>
+    </div>`;
+}
+
+async function decideGate(decision) {
+  if (!pendingGate) return;
+  const g = pendingGate;
+  pendingGate = null;
+  const handle = await resumeGate(g.gate, g.run_id, decision);
+  if (handle.status === "paused" && handle.pending_gate) {
+    pendingGate = { run_id: handle.run_id, ...handle.pending_gate };
+  }
+  render();
 }
 
 async function act(postingId, verdict) {
@@ -103,18 +136,19 @@ async function postAction(postingId, action) {
 }
 async function draftLetter(postingId) {
   const handle = await api(`/postings/${postingId}/letter`, { method: "POST" });
-  alert(handle.status === "paused" ? "Letter drafted — paused at " + handle.pending_gate.gate + " gate (run_id " + handle.run_id + ")" : "Letter run complete.");
+  if (handle.status === "paused" && handle.pending_gate) pendingGate = { run_id: handle.run_id, ...handle.pending_gate };
+  else alert("Letter run complete — no letter drafted (nothing to approve).");
   render();
 }
 async function triggerRun() {
   const handle = await api("/runs/trigger", { method: "POST" });
-  alert(handle.status === "paused" ? "Run paused at " + handle.pending_gate.gate + " gate (run_id " + handle.run_id + ")" : "Run complete.");
+  if (handle.status === "paused" && handle.pending_gate) pendingGate = { run_id: handle.run_id, ...handle.pending_gate };
+  else alert("Run complete — queue below.");
   render();
 }
 async function resumeGate(kind, runId, decision) {
   const path = kind === "search_plan" ? `/runs/${runId}/resume` : kind === "outbound_letter" ? `/letters/${runId}/resume` : `/scope-expansion/${runId}/resume`;
-  await api(path, { method: "POST", body: JSON.stringify({ decision }) });
-  render();
+  return api(path, { method: "POST", body: JSON.stringify({ decision }) });
 }
 
 async function renderPosting(postingId) {

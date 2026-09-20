@@ -14,12 +14,25 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from jobscout import spend
 from jobscout.service import CoreService, get_service
+
+# override=True: .env is this app's single source of config truth (README/.env.example) --
+# a stray shell export of the same name (e.g. left over from an ablation-sweep session that
+# mutates OPENROUTER_MODEL/FEEDBACK_MECHANISM in-process) must not silently outrank it.
+#
+# Deliberately loaded HERE, not in `jobscout/__init__.py`: this module is only ever imported
+# by the real entrypoints (`jobscout serve`/CLI via `serve.py`, or `uvicorn jobscout.web:app`
+# directly), never by `jobscout.service`/`jobscout.graph.*`/etc. on their own -- loading it at
+# the package level instead broke test isolation (confirmed live: it silently pulled real
+# `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` into every test process, including ones mocking discovery,
+# so a "stub 1 fake posting" test got 51 real ones back from a live network call).
+load_dotenv(override=True)
 
 STATIC_DIR = Path(__file__).parent / "static"
 

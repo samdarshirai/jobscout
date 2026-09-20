@@ -338,9 +338,17 @@ def bake_off_cell(
     read-only tool calls inside `score_posting` run concurrently on
     `conn`, the same shared-connection-from-multiple-threads pattern
     already relied on for the ReAct agent's own internal tool-thread-pool
-    (`storage/db.get_connection`'s `check_same_thread=False`)."""
-    os.environ["OPENROUTER_MODEL"] = model
-    os.environ["FEEDBACK_MECHANISM"] = mechanism
+    (`storage/db.get_connection`'s `check_same_thread=False`).
+
+    The env-var set is scoped to `if to_score:` below, not unconditional
+    at the top -- confirmed live: unit 39's read-only reconstruction path
+    (`_read_only_cell`, called with `postings=[]` so `to_score` is always
+    empty) called this with an ABLATION LABEL (e.g. "matched-lines-off",
+    not a real model id) in the `model` slot. Setting `OPENROUTER_MODEL`
+    unconditionally poisoned it process-wide for every subsequent REAL
+    LLM call in a long-lived process (`jobscout serve`'s web app calling
+    `get_eval_view()`), breaking a live Poll's search-plan derivation
+    with a 400 from OpenRouter until the process was restarted."""
     criteria_version = _latest_criteria_version(conn)
     already_scored = {
         r["posting_id"] for r in conn.execute(
@@ -366,6 +374,8 @@ def bake_off_cell(
                 return posting, None, exc
 
     if to_score:
+        os.environ["OPENROUTER_MODEL"] = model
+        os.environ["FEEDBACK_MECHANISM"] = mechanism
         with ThreadPoolExecutor(max_workers=BAKE_OFF_CONCURRENCY) as pool:
             futures = [pool.submit(_attempt, p) for p in to_score]
             for future in as_completed(futures):

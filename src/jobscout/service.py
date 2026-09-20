@@ -670,6 +670,21 @@ class CoreService:
         )
         self._conn.commit()
 
+    def skip_posting(self, posting_id: str) -> None:
+        """Telegram's "skip" button (DESIGN §12, unit 40): drops a Posting
+        out of the Queue without recording a thumbs Verdict -- distinct
+        from `record_verdict`, which is a preference signal that feeds the
+        Feedback Loop (§7); skip is just "don't show me this one again."""
+        row = self._conn.execute(
+            "SELECT id FROM app_posting WHERE id = ?", (posting_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no such Posting: {posting_id!r}")
+        self._conn.execute(
+            "UPDATE app_posting SET status = 'skipped' WHERE id = ?", (posting_id,)
+        )
+        self._conn.commit()
+
     # ---- lifecycle --------------------------------------------------
     def close(self) -> None:
         self._conn.close()

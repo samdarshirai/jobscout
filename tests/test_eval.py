@@ -6,14 +6,20 @@ import time
 import pytest
 
 from jobscout.eval import (
+    _inject_context_truncation,
     _score_with_deadline,
+    ablation_deltas_from_db,
     bake_off_cell,
+    bake_off_table_from_db,
     cost_per_posting,
     divergence_triage,
+    generate_findings,
     knockout_correctness,
     matched_lines_real,
     matched_lines_relevance,
     run_bake_off,
+    run_context_truncation_check,
+    run_stale_jd_check,
     score_rationale_consistency,
     seed_set_eval,
     spearman_correlation,
@@ -439,3 +445,166 @@ def test_bake_off_cell_skips_a_posting_that_times_out_on_both_attempts(tmp_path,
     assert conn.execute(
         "SELECT COUNT(*) AS n FROM app_score WHERE run_id='bakeoff:m-x:none'"
     ).fetchone()["n"] == 0
+
+
+def test_inject_context_truncation_chops_the_resume():
+    resume = "x" * 1000
+    assert len(_inject_context_truncation(resume)) == 400
+    assert _inject_context_truncation("short resume") == "short resume"
+
+
+def test_run_context_truncation_check_scores_every_posting_with_the_chopped_resume(tmp_path, monkeypatch):
+    conn = _conn_with_resume(tmp_path, resume_text="x" * 1000)
+    seen_resumes = {}
+
+    def _fake_score_posting(posting, scored, resume_text, companies, conn):
+        seen_resumes[posting["id"]] = resume_text
+        return {"score": 50, "rationale": "why", "dimensions": [], "content_hash": None}
+
+    monkeypatch.setattr("jobscout.eval.score_posting", _fake_score_posting)
+    postings = [{"id": "p1", "jd_text": "JD"}, {"id": "p2", "jd_text": "JD"}]
+
+    result = run_context_truncation_check(conn, postings, [], "x" * 1000, [])
+
+    assert result == {"inject": "context-truncation", "n": 2, "scored": ["p1", "p2"], "crashed": []}
+    assert all(len(text) == 400 for text in seen_resumes.values())
+
+
+def test_run_context_truncation_check_isolates_a_crash_to_one_posting(tmp_path, monkeypatch):
+    conn = _conn_with_resume(tmp_path)
+
+    def _fake_score_posting(posting, scored, resume_text, companies, conn):
+        if posting["id"] == "p1":
+            raise ValueError("malformed JD")
+        return {"score": 50, "rationale": "why", "dimensions": [], "content_hash": None}
+
+    monkeypatch.setattr("jobscout.eval.score_posting", _fake_score_posting)
+    postings = [{"id": "p1", "jd_text": "JD"}, {"id": "p2", "jd_text": "JD"}]
+
+    result = run_context_truncation_check(conn, postings, [], "resume", [])
+
+    assert result["scored"] == ["p2"]
+    assert result["crashed"] == [{"posting_id": "p1", "error": "ValueError: malformed JD"}]
+
+
+def test_run_stale_jd_check_skips_the_stale_refetch_but_catches_the_true_edit(tmp_path, monkeypatch):
+    conn = _conn_with_resume(tmp_path)
+    monkeypatch.setattr(
+        "jobscout.score.score_posting",
+        lambda posting, scored, resume_text, companies, conn: {
+            "score": 50, "rationale": "why", "dimensions": [], "content_hash": posting.get("content_hash"),
+        },
+    )
+    postings = [{"id": "p1", "jd_text": "We need Angular."}]
+    criteria = {"scored": [{"dimension": "stack fit", "weight": 1.0}]}
+
+    result = run_stale_jd_check(conn, postings, criteria, "fault:stale-jd", tmp_path / "companies.yaml")
+
+    assert result["n"] == 1
+    # round 2 re-feeds the SAME content_hash as round 1 -- unit 20's gate
+    # must recognize it as unchanged and skip, not re-score
+    assert result["stale_correctly_skipped"] == ["p1"]
+    # round 3's content_hash genuinely differs -- the gate must catch it
+    assert result["true_edit_still_rescored"] == ["p1"]
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM app_score WHERE run_id='fault:stale-jd'"
+    ).fetchone()["n"] == 1
+
+
+def test_bake_off_table_from_db_reconstructs_every_bakeoff_run_id_read_only(tmp_path, monkeypatch):
+    conn = _conn_with_resume(tmp_path)
+    conn.execute(
+        "INSERT INTO app_seed_label (posting_id, overall, thumb, why, round) VALUES ('p1', 80, 'up', 'why', 1)"
+    )
+    conn.execute(
+        "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json) "
+        "VALUES ('p1', 'bakeoff:frontier:none', 70, 'why', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json) "
+        "VALUES ('p1', 'bakeoff:qwen:summary', 85, 'why', '[]')"
+    )
+    conn.commit()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not call the model -- read-only")
+
+    monkeypatch.setattr("jobscout.eval.score_posting", _boom)
+
+    table = bake_off_table_from_db(conn)
+
+    assert table == [
+        {"model": "frontier", "mechanism": "none", "n": 1, "spearman": None,
+         "cost_total": 0.0, "cost_per_posting": 0.0, "model_name": "frontier"},
+        {"model": "qwen", "mechanism": "summary", "n": 1, "spearman": None,
+         "cost_total": 0.0, "cost_per_posting": 0.0, "model_name": "qwen"},
+    ]
+
+
+def test_ablation_deltas_from_db_computes_delta_against_the_given_baseline(tmp_path, monkeypatch):
+    conn = _conn_with_resume(tmp_path)
+    conn.execute(
+        "INSERT INTO app_seed_label (posting_id, overall, thumb, why, round) VALUES ('p1', 20, 'down', 'why', 1)"
+    )
+    conn.execute(
+        "INSERT INTO app_seed_label (posting_id, overall, thumb, why, round) VALUES ('p2', 80, 'up', 'why', 1)"
+    )
+    conn.execute(
+        "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json) "
+        "VALUES ('p1', 'ablation:feedback-off', 25, 'why', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json) "
+        "VALUES ('p2', 'ablation:feedback-off', 85, 'why', '[]')"
+    )
+    conn.commit()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not call the model -- read-only")
+
+    monkeypatch.setattr("jobscout.eval.score_posting", _boom)
+
+    result = ablation_deltas_from_db(conn, baseline_spearman=0.5)
+
+    assert result == [{
+        "ablation": "feedback-off", "n": 2, "spearman": pytest.approx(1.0),
+        "baseline_spearman": 0.5, "delta": pytest.approx(0.5),
+    }]
+
+
+def test_generate_findings_writes_markdown_and_returns_it(tmp_path, monkeypatch):
+    conn = _conn_with_resume(tmp_path)
+    monkeypatch.setattr(
+        "jobscout.eval.seed_set_eval",
+        lambda conn, round=1: {
+            "n": 2, "spearman": 0.7, "target": 0.6, "meets_target": True,
+            "knockout_false_exclusions": [], "knockout_false_exclusion_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "jobscout.eval.bake_off_table_from_db",
+        lambda conn: [{"model_name": "kimi", "model": "kimi", "mechanism": "summary", "n": 30,
+                       "spearman": 0.75, "cost_total": 1.2, "cost_per_posting": 0.04}],
+    )
+    monkeypatch.setattr(
+        "jobscout.eval.ablation_deltas_from_db",
+        lambda conn, baseline_spearman: [{"ablation": "feedback-off", "n": 30, "spearman": 0.656,
+                                          "baseline_spearman": baseline_spearman, "delta": -0.044}],
+    )
+    monkeypatch.setattr(
+        "jobscout.eval.divergence_triage",
+        lambda conn, round=1: {
+            "threshold": 25, "n_diverged": 1, "by_category": {"she_is_outlier": 1},
+            "cases": [{"posting_id": "p1", "agent_overall": 30, "human_overall": 90, "diff": 60,
+                       "category": "she_is_outlier", "reasoning": "her logic is the outlier here"}],
+        },
+    )
+    out_path = tmp_path / "FINDINGS.md"
+
+    markdown = generate_findings(conn, out_path=out_path)
+
+    assert out_path.read_text() == markdown
+    assert "kimi" in markdown and "0.75" in markdown
+    assert "feedback-off" in markdown and "-0.044" in markdown
+    assert "Pending" in markdown  # drift-closure curve, no round-2 labels yet
+    assert "she_is_outlier" in markdown

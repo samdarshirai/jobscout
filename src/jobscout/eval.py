@@ -10,12 +10,14 @@ a Posting she actually wanted — thumb up — is the worst failure, target
 """
 
 import contextvars
+import hashlib
 import json
 import os
 import queue
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from jobscout import spend
 from jobscout.discovery.companies import DEFAULT_COMPANIES_PATH, TargetCompany, load_companies
@@ -27,7 +29,7 @@ from jobscout.judge import (
 )
 from jobscout.llm import BAKE_OFF_MODELS
 from jobscout.retry import with_retry
-from jobscout.score import _latest_criteria_version, _latest_resume_text, score_posting
+from jobscout.score import _latest_criteria_version, _latest_resume_text, score_posting, score_postings
 
 BAKE_OFF_MECHANISMS = ("none", "few-shot", "summary", "both")
 
@@ -433,3 +435,240 @@ def run_bake_off(
             )
             table.append({"model_name": model_name, **cell})
     return table
+
+
+# Fault injection (DESIGN §15, build-plan unit 38): stress the long-horizon
+# machinery (dedupe/staleness §11, memory §7) that only ever gets exercised
+# by real time passing over real Polls -- these two flags force a bad-input
+# scenario the eval harness can hit in one process instead of waiting weeks.
+
+_CONTEXT_TRUNCATION_CHARS = 400  # short enough to starve the scorer, not just shrink it
+
+
+def _inject_context_truncation(resume_text: str) -> str:
+    return resume_text[:_CONTEXT_TRUNCATION_CHARS]
+
+
+def run_context_truncation_check(
+    conn: sqlite3.Connection,
+    postings: list[dict],
+    scored_dims: list[dict],
+    resume_text: str,
+    companies: list[TargetCompany],
+) -> dict:
+    """`--inject context-truncation`: scores every given Posting against a
+    chopped resume (§15). A starved resume SHOULD score worse -- that's not
+    the failure mode under test. What's under test is whether scoring still
+    completes and returns a well-formed result for every Posting instead of
+    crashing (§17's one-bad-posting-never-blocks-the-batch posture, stressed
+    by a universally-bad input instead of a one-off)."""
+    truncated = _inject_context_truncation(resume_text)
+    scored, crashed = [], []
+    for posting in postings:
+        try:
+            score_posting(posting, scored_dims, truncated, companies, conn)
+            scored.append(posting["id"])
+        except Exception as exc:
+            crashed.append({"posting_id": posting["id"], "error": f"{type(exc).__name__}: {exc}"})
+    return {"inject": "context-truncation", "n": len(postings), "scored": scored, "crashed": crashed}
+
+
+def _persist_scored(conn: sqlite3.Connection, run_id: str, postings: list[dict]) -> None:
+    """`run_stale_jd_check` calls `score_postings` directly (no graph, no
+    service layer), so it has to do the same app_score bookkeeping the real
+    `score` node's caller (`service._save_scores`) normally does -- otherwise
+    the content_hash gate under test has no prior Score row to compare the
+    next simulated pass against."""
+    for p in postings:
+        if "score" not in p:
+            continue
+        conn.execute(
+            "INSERT INTO app_score (posting_id, run_id, score, rationale, dimensions_json, content_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (p["id"], run_id, p["score"], p["rationale"], json.dumps(p["dimensions"]), p.get("content_hash")),
+        )
+    conn.commit()
+
+
+def _fresh_postings(jd_by_id: dict[str, str]) -> list[dict]:
+    """A minimal (id, jd_text, content_hash) dict per Posting -- what
+    `fetch_jd` actually hands `score_postings` each real Poll (§4), not the
+    enriched score/rationale/dimensions dict a *previous* pass produced.
+    `run_stale_jd_check` must rebuild this shape itself each simulated Poll
+    or `score_postings`' `{**posting, "status": "scored"}` skip-path would
+    keep leaking the PRIOR round's own "score" key forward, masking a real
+    skip as a rescore."""
+    return [
+        {"id": pid, "jd_text": jd_text, "content_hash": hashlib.sha256(jd_text.encode()).hexdigest()}
+        for pid, jd_text in jd_by_id.items()
+    ]
+
+
+def run_stale_jd_check(
+    conn: sqlite3.Connection,
+    postings: list[dict],
+    criteria: dict,
+    run_id: str,
+    companies_path=DEFAULT_COMPANIES_PATH,
+) -> dict:
+    """`--inject stale-jd`: feeds `score_postings` the OLD jd_text/content_hash
+    of an edited Posting (§15) -- exactly what a stale/cached re-fetch would
+    hand it. Three simulated Polls: first score, a stale re-fetch (identical
+    jd_text/content_hash), then the true edit (genuinely new jd_text) landing
+    on a later Poll. Reports whether unit 20's re-score gate (§11) still
+    catches the true edit once it actually arrives, rather than staying
+    poisoned by the stale round in between."""
+    jd_by_id = {p["id"]: p["jd_text"] for p in postings}
+
+    first_pass = score_postings(_fresh_postings(jd_by_id), criteria, conn, companies_path)
+    _persist_scored(conn, run_id, first_pass)
+
+    stale_result = score_postings(_fresh_postings(jd_by_id), criteria, conn, companies_path)
+    stale_skipped = [p["id"] for p in stale_result if "score" not in p]
+
+    edited_jd = {pid: text + " (edited)" for pid, text in jd_by_id.items()}
+    edited_result = score_postings(_fresh_postings(edited_jd), criteria, conn, companies_path)
+    edited_rescored = [p["id"] for p in edited_result if "score" in p]
+
+    return {
+        "inject": "stale-jd", "n": len(postings),
+        "stale_correctly_skipped": stale_skipped,
+        "true_edit_still_rescored": edited_rescored,
+    }
+
+
+# ---- unit 39: FINDINGS.md, generated from everything already run above ----
+
+
+def _read_only_cell(conn: sqlite3.Connection, label: str, mechanism: str, run_id: str) -> dict:
+    """`bake_off_cell` read-only: `postings=[]` means `to_score` is always
+    empty, so it never calls a model or spends -- it just reads whatever a
+    PAST run already wrote to `app_score`/`app_spend` under `run_id` and
+    computes that cell's spearman/cost from it. Reused here (Bake-Off table
+    + ablation deltas) instead of re-running the sweep to build FINDINGS.md."""
+    return bake_off_cell(conn, [], [], "", [], label, mechanism, run_id)
+
+
+def bake_off_table_from_db(conn: sqlite3.Connection) -> list[dict]:
+    """The Bake-Off table (§15, unit 36), reconstructed read-only from
+    whatever `bakeoff:<model>:<mechanism>` run_ids are already in `app_score`
+    -- no re-scoring, no new spend."""
+    run_ids = [
+        r["run_id"] for r in conn.execute(
+            "SELECT DISTINCT run_id FROM app_score WHERE run_id LIKE 'bakeoff:%' ORDER BY run_id"
+        ).fetchall()
+    ]
+    table = []
+    for run_id in run_ids:
+        _, model_name, mechanism = run_id.split(":", 2)
+        cell = _read_only_cell(conn, model_name, mechanism, run_id)
+        table.append({"model_name": model_name, **cell})
+    return table
+
+
+def ablation_deltas_from_db(conn: sqlite3.Connection, baseline_spearman: float) -> list[dict]:
+    """Ablation deltas (§15, unit 37), reconstructed read-only from whatever
+    `ablation:<name>` run_ids are already in `app_score` -- delta is that
+    variant's spearman minus the real production spearman (`baseline_spearman`,
+    from `seed_set_eval`), same sign convention as unit 37: negative means the
+    switched-off mechanism was helping."""
+    run_ids = [
+        r["run_id"] for r in conn.execute(
+            "SELECT DISTINCT run_id FROM app_score WHERE run_id LIKE 'ablation:%' ORDER BY run_id"
+        ).fetchall()
+    ]
+    deltas = []
+    for run_id in run_ids:
+        name = run_id.split(":", 1)[1]
+        cell = _read_only_cell(conn, name, "", run_id)
+        deltas.append({
+            "ablation": name, "n": cell["n"], "spearman": cell["spearman"],
+            "baseline_spearman": baseline_spearman,
+            "delta": None if cell["spearman"] is None else cell["spearman"] - baseline_spearman,
+        })
+    return deltas
+
+
+def _findings_markdown(
+    baseline: dict, bake_off_table: list[dict], ablations: list[dict], triage: dict,
+) -> str:
+    lines = ["# FINDINGS", ""]
+
+    lines += ["## Outcome metric", ""]
+    lines += [
+        f"Spearman rank correlation (Agent overall vs the Candidate's overall label), "
+        f"production run, n={baseline['n']}: **{baseline['spearman']:.3f}** "
+        f"(target ≥ {baseline['target']}, {'met' if baseline['meets_target'] else 'NOT met'}).",
+        "",
+        f"Knockout false-exclusion count: **{baseline['knockout_false_exclusion_count']}** "
+        "(a Posting she thumbed up that a Knockout excluded -- the worst failure mode, target 0).",
+        "",
+    ]
+    for fe in baseline["knockout_false_exclusions"]:
+        lines.append(f"- `{fe['posting_id']}`: her overall {fe['human_overall']}, thumb up, excluded")
+    lines.append("")
+
+    lines += ["## Bake-Off", ""]
+    lines += ["| Model | Mechanism | n | Spearman | Cost/posting |", "|---|---|---|---|---|"]
+    for row in bake_off_table:
+        spearman = "n/a" if row["spearman"] is None else f"{row['spearman']:.3f}"
+        lines.append(
+            f"| {row['model_name']} | {row['mechanism']} | {row['n']} | {spearman} | "
+            f"${row['cost_per_posting']:.4f} |"
+        )
+    lines.append("")
+
+    lines += ["## Ablation deltas", ""]
+    lines += ["| Ablation | n | Spearman | Delta vs. production | |", "|---|---|---|---|---|"]
+    for row in ablations:
+        spearman = "n/a" if row["spearman"] is None else f"{row['spearman']:.3f}"
+        delta = "n/a" if row["delta"] is None else f"{row['delta']:+.3f}"
+        note = "helps (removing it hurt)" if (row["delta"] or 0) < 0 else "costs correlation, by design" if row["delta"] else ""
+        lines.append(f"| {row['ablation']} | {row['n']} | {spearman} | {delta} | {note} |")
+    lines.append("")
+
+    lines += ["## Drift-closure curve", ""]
+    lines += [
+        "Pending -- needs the Candidate's round-2 end-of-project re-label "
+        "(~15 Postings, DESIGN §15) to measure her own drift and whether the "
+        "Preference Feedback Loop closed the gap. No round-2 labels exist yet.",
+        "",
+    ]
+
+    lines += ["## Failure-mode writeups", ""]
+    lines += [
+        f"{triage['n_diverged']} of {baseline['n']} Postings diverged "
+        f"(|agent − human| ≥ {triage['threshold']}) and were triaged by the calibrated judge:",
+        "",
+    ]
+    for category, count in sorted(triage["by_category"].items()):
+        lines.append(f"- **{category}**: {count}")
+    lines.append("")
+    for case in triage["cases"]:
+        lines.append(
+            f"- `{case['posting_id']}` (agent {case['agent_overall']} vs her {case['human_overall']}, "
+            f"diff {case['diff']}) -- *{case['category']}*: {case['reasoning']}"
+        )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_findings(
+    conn: sqlite3.Connection, out_path: Path = Path("FINDINGS.md"), round: int = 1,
+) -> str:
+    """Assembles FINDINGS.md (DESIGN §19, build-plan unit 39) from
+    everything units 31-38 already produced in `conn`: the Bake-Off table
+    and ablation deltas are read-only reconstructions (no re-scoring, no
+    new spend, §15); the failure-mode triage runs the calibrated judge live
+    over whatever Postings currently diverge (small real spend -- typically
+    a handful of calls, §15). The Drift-closure curve is reported as
+    pending until round-2 labels exist -- there is no data to fabricate it
+    from."""
+    baseline = seed_set_eval(conn, round)
+    bake_off_table = bake_off_table_from_db(conn)
+    ablations = ablation_deltas_from_db(conn, baseline["spearman"])
+    triage = divergence_triage(conn, round)
+    markdown = _findings_markdown(baseline, bake_off_table, ablations, triage)
+    out_path.write_text(markdown)
+    return markdown

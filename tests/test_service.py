@@ -1094,3 +1094,30 @@ def test_mark_applied_requires_an_existing_posting(tmp_path):
     with pytest.raises(ValueError):
         svc.mark_applied("does-not-exist")
     svc.close()
+
+
+def test_skip_posting_sets_status_and_drops_it_from_the_queue(tmp_path):
+    svc = _svc(tmp_path)
+    svc._conn.execute(
+        "INSERT INTO app_posting (id, source, company, title, status) "
+        "VALUES ('p1', 'arbeitnow', 'Acme', 'Eng', 'scored')"
+    )
+    svc._conn.execute(
+        "INSERT INTO app_score (posting_id, score, rationale, dimensions_json) "
+        "VALUES ('p1', 80, 'why', '[]')"
+    )
+    svc._conn.commit()
+
+    svc.skip_posting("p1")
+
+    row = svc._conn.execute("SELECT status FROM app_posting WHERE id = 'p1'").fetchone()
+    assert row["status"] == "skipped"
+    assert svc.get_queue() == []
+    svc.close()
+
+
+def test_skip_posting_requires_an_existing_posting(tmp_path):
+    svc = _svc(tmp_path)
+    with pytest.raises(ValueError):
+        svc.skip_posting("does-not-exist")
+    svc.close()

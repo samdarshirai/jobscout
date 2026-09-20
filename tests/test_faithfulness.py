@@ -71,3 +71,48 @@ def test_check_faithfulness_calls_structured_llm(monkeypatch):
     assert captured["schema"] is FaithfulnessReport
     assert "Dear Hiring Manager, I have 5 years Python." in captured["prompt"]
     assert "5+ years Python experience." in captured["prompt"]
+
+
+def test_check_faithfulness_includes_profile_in_the_prompt(monkeypatch):
+    """Confirmed live (unit 37 ablation): a real letter's language-level
+    and location-preference claims only the Profile supports (not the
+    Resume) came back "untraceable" until the checker could see Profile
+    too."""
+    expected = FaithfulnessReport(claims=[])
+    captured = {}
+
+    class _FakeStructuredLLM:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return expected
+
+    class _FakeLLM:
+        def with_structured_output(self, schema):
+            return _FakeStructuredLLM()
+
+    monkeypatch.setattr("jobscout.faithfulness.get_llm", lambda: _FakeLLM())
+
+    profile = {"static_answers": {"german_level": "b1"}}
+    check_faithfulness("My German is B1.", "resume text", profile)
+
+    assert "german_level" in captured["prompt"]
+
+
+def test_check_faithfulness_profile_defaults_to_n_a(monkeypatch):
+    expected = FaithfulnessReport(claims=[])
+    captured = {}
+
+    class _FakeStructuredLLM:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return expected
+
+    class _FakeLLM:
+        def with_structured_output(self, schema):
+            return _FakeStructuredLLM()
+
+    monkeypatch.setattr("jobscout.faithfulness.get_llm", lambda: _FakeLLM())
+
+    check_faithfulness("letter", "resume")
+
+    assert "n/a" in captured["prompt"]

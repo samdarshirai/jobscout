@@ -46,7 +46,7 @@ def _stub_draft(monkeypatch):
 def _stub_faithfulness(monkeypatch):
     monkeypatch.setattr(
         "jobscout.graph.letter.check_faithfulness",
-        lambda letter_body, resume_text: _FakeFaithfulness(),
+        lambda letter_body, resume_text, profile: _FakeFaithfulness(),
     )
 
 

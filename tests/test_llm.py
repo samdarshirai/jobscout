@@ -1,6 +1,6 @@
 import pytest
 
-from jobscout.llm import DEFAULT_BASE_URL, DEFAULT_MODEL, get_llm
+from jobscout.llm import DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_TIMEOUT_S, get_llm
 
 
 def test_get_llm_uses_default_model_base_url_and_deny_routing(monkeypatch):
@@ -14,6 +14,28 @@ def test_get_llm_uses_default_model_base_url_and_deny_routing(monkeypatch):
     assert llm.openai_api_base == DEFAULT_BASE_URL
     assert llm.extra_body == {"provider": {"data_collection": "deny"}}
     assert llm.openai_api_key.get_secret_value() == "test-key"
+
+
+def test_get_llm_sets_an_explicit_timeout_not_the_sdks_600s_default(monkeypatch):
+    # A stalled request with no explicit timeout blocks a Poll for up to
+    # 10 minutes with no sign of life — confirmed live against a real
+    # OpenRouter call during unit 31 data collection.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    llm = get_llm()
+
+    assert llm.request_timeout == DEFAULT_TIMEOUT_S
+
+
+def test_get_llm_caps_max_tokens_to_bound_worst_case_generation_length(monkeypatch):
+    # request_timeout is a per-chunk read timeout, not a total-duration cap
+    # — a trickling response never trips it. This is the real backstop
+    # against one call rambling for minutes; confirmed live the same day.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    llm = get_llm()
+
+    assert llm.max_tokens == DEFAULT_MAX_TOKENS
 
 
 def test_get_llm_model_env_var_switches_model_with_no_code_change(monkeypatch):

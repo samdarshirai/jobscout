@@ -276,7 +276,7 @@ def test_poll_graph_excludes_a_posting_failing_a_knockout(tmp_path, monkeypatch)
     _stub_discovery(monkeypatch)
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
-        lambda jd_text, rules: KnockoutFacts(
+        lambda jd_text, rules, city=None: KnockoutFacts(
             axes=[AxisFact(axis="german_required", passes=False, evidence="C1 German required")]
         ),
     )
@@ -297,7 +297,7 @@ def test_poll_graph_keeps_a_posting_passing_every_knockout(tmp_path, monkeypatch
     _stub_discovery(monkeypatch)
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
-        lambda jd_text, rules: KnockoutFacts(
+        lambda jd_text, rules, city=None: KnockoutFacts(
             axes=[AxisFact(axis="german_required", passes=True, evidence="no German mentioned")]
         ),
     )
@@ -343,7 +343,7 @@ def test_poll_graph_never_scores_a_posting_excluded_by_a_knockout(tmp_path, monk
     _stub_discovery(monkeypatch)
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
-        lambda jd_text, rules: KnockoutFacts(
+        lambda jd_text, rules, city=None: KnockoutFacts(
             axes=[AxisFact(axis="seniority_band", passes=False, evidence="junior role")]
         ),
     )
@@ -374,7 +374,7 @@ def test_poll_graph_marks_a_posting_error_when_knockout_extraction_raises(tmp_pa
     _stub_search_plan(monkeypatch)
     _stub_discovery(monkeypatch)
 
-    def _boom(jd_text, rules):
+    def _boom(jd_text, rules, city=None):
         raise ValueError("malformed JD")
 
     monkeypatch.setattr("jobscout.graph.poll.extract_knockout_facts", _boom)
@@ -398,7 +398,7 @@ def test_poll_graph_marks_a_posting_dead_after_three_consecutive_knockout_errors
     _stub_search_plan(monkeypatch)
     _stub_discovery(monkeypatch)
 
-    def _boom(jd_text, rules):
+    def _boom(jd_text, rules, city=None):
         raise ValueError("model 500")
 
     monkeypatch.setattr("jobscout.graph.poll.extract_knockout_facts", _boom)

@@ -6,7 +6,9 @@ service-layer read of persisted status/score, not a new graph node.
 """
 
 import hashlib
+import logging
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import TypedDict
@@ -28,6 +30,8 @@ from jobscout.knockout import decide_knockout, extract_knockout_facts
 from jobscout.retry import with_retry
 from jobscout.score import score_postings
 from jobscout.search_plan import derive_search_plan
+
+logger = logging.getLogger(__name__)
 
 
 class PollState(TypedDict):
@@ -52,6 +56,56 @@ def _after_gate(state: PollState) -> str:
 
 def _normalize(text: str) -> str:
     return text.strip().lower()
+
+
+# Words to drop from a Search Plan query before treating what's left as a
+# relevance keyword — generic job-title/location vocabulary AND business/
+# domain buzzwords that show up in almost any company's marketing copy
+# regardless of role (confirmed live: "platform"/"saas"/"fintech"/
+# "enterprise" let Account Executive, Talent Acquisition, Data Scientist,
+# and Cloud Engineer postings all through — none of those are a stack
+# signal, they're just words a company's About section uses).
+_GENERIC_QUERY_WORDS = {
+    "senior", "lead", "staff", "principal", "junior", "mid", "engineer",
+    "engineers", "developer", "architect", "frontend", "front-end", "backend",
+    "back-end", "fullstack", "full-stack", "software", "germany", "remote",
+    "hybrid", "onsite", "berlin", "munich", "hamburg", "cologne", "frankfurt",
+    "enterprise", "saas", "fintech", "platform", "b2b", "b2c", "product",
+    "entwickler", "digital", "cloud", "data", "talent", "team", "tech",
+    "consulting", "sales", "marketing", "account", "executive", "manager",
+    "acquisition", "administration", "scientist", "process", "design",
+    "system", "component", "components", "signals", "legacy", "library",
+    "modernization", "material", "architecture", "optimization", "performance",
+    "accessibility", "api", "ci/cd", "english", "marketplace", "migration",
+    "rest", "technical", "testing", "web", "frontends",
+}
+
+
+def _relevance_keywords(search_plan: dict) -> set[str]:
+    """Plain-Python pre-filter signal (no LLM — DESIGN §17, `must_have_stack`
+    etc. are hard constraints, not something to spend an LLM call deciding
+    per Posting when a keyword already answers it): the content words left
+    in the Search Plan's own queries after stripping generic job-title
+    vocabulary. Empty when nothing distinctive is left — callers must treat
+    that as "no filter," not "match nothing.\""""
+    keywords: set[str] = set()
+    for query in search_plan.get("queries", []):
+        for word in _normalize(query).replace(",", " ").split():
+            word = word.strip(".()")
+            if len(word) > 2 and word not in _GENERIC_QUERY_WORDS:
+                keywords.add(word)
+    return keywords
+
+
+def _is_relevant(posting: dict, keywords: set[str]) -> bool:
+    """Whole-word match, not substring — confirmed live: substring match
+    let "micro" (from a "Micro Frontends" query) match "microservices" in
+    any backend JD, and would do the same for "system" in "ecosystem" etc.
+    A stack term should match the term, not any word containing it."""
+    if not keywords:
+        return True
+    text = _normalize(f"{posting.get('title', '')} {posting.get('jd_text') or ''}")
+    return any(re.search(rf"\b{re.escape(kw)}\b", text) for kw in keywords)
 
 
 def fetch_jd(state: PollState) -> dict:
@@ -103,16 +157,46 @@ def build_poll_graph(
         (unit 22), DESIGN §3's three discovery Sources — one shared
         client. Adzuna needs a free app_id+key (`.env.example`); when
         unset, Adzuna discovery is skipped rather than failing the Poll
-        (§17), since it's a supplementary Source, not the only one."""
+        (§17), since it's a supplementary Source, not the only one.
+
+        Adzuna/arbeitnow return their whole unfiltered catalogue — neither
+        adapter takes the Search Plan's own query terms, so most of what
+        comes back can be trivially off-stack (confirmed live: arbeitnow
+        alone returned 247 Postings, the overwhelming majority nowhere
+        near this Criteria's stack). Sending every one of those through an
+        LLM Knockout call just to reject "Steuerberater" is real, wasted
+        spend for a decision a plain keyword check already answers — so a
+        cheap, code-only relevance filter (DESIGN §17, no LLM) runs here
+        against the Search Plan's own query keywords, before Knockout ever
+        sees them. Curated ATS Boards are hand-picked Target Companies, but
+        a company's own careers page still lists every open role, not just
+        engineering ones (confirmed live: Celonis alone returned 476
+        Postings, mostly sales/AE/consulting) — so the same filter applies
+        to curated Postings too, only the company itself is hand-picked,
+        not every role it happens to have open."""
         client = httpx.Client(timeout=10.0)
         try:
-            postings = discover_curated_ats(conn, companies_path, client)
+            curated = discover_curated_ats(conn, companies_path, client)
+            broad = []
             app_id = os.environ.get("ADZUNA_APP_ID")
             app_key = os.environ.get("ADZUNA_APP_KEY")
             if app_id and app_key:
-                postings += discover_adzuna(client, app_id, app_key)
-            postings += discover_arbeitnow(client)
-            return {"postings": postings}
+                broad += discover_adzuna(client, app_id, app_key)
+            broad += discover_arbeitnow(client)
+
+            keywords = _relevance_keywords(state["search_plan"])
+            relevant_curated = [p for p in curated if _is_relevant(p, keywords)]
+            relevant_broad = [p for p in broad if _is_relevant(p, keywords)]
+            logger.info(
+                "discover: %d/%d curated + %d/%d broad-Source Postings kept "
+                "(relevance keywords: %s)",
+                len(relevant_curated),
+                len(curated),
+                len(relevant_broad),
+                len(broad),
+                sorted(keywords) or "none — no filter applied",
+            )
+            return {"postings": relevant_curated + relevant_broad}
         finally:
             client.close()
 
@@ -131,13 +215,32 @@ def build_poll_graph(
             by_company_title.setdefault(key, []).append(posting)
 
         run_id = config["configurable"]["thread_id"]
+        collisions = [g for g in by_company_title.values() if len(g) > 1]
+        if collisions:
+            logger.info(
+                "dedupe: %d company+title collision group(s) need a tie-break call",
+                len(collisions),
+            )
 
         def _run_tie_breaks() -> list[dict]:
             result = []
+            done = 0
             for group in by_company_title.values():
                 kept: list[dict] = []
                 for candidate in group:
-                    if any(same_posting_cached(conn, candidate, k) for k in kept):
+                    same = False
+                    for k in kept:
+                        done += 1
+                        logger.info(
+                            "dedupe tie-break %d: %s — %s",
+                            done,
+                            candidate.get("company", "?"),
+                            candidate.get("title", candidate.get("id", "?")),
+                        )
+                        if same_posting_cached(conn, candidate, k):
+                            same = True
+                            break
+                    if same:
                         continue
                     kept.append(candidate)
                 result.extend(kept)
@@ -145,6 +248,7 @@ def build_poll_graph(
 
         deduped, rows = spend.run_and_track(_run_tie_breaks)
         spend.log_spend(conn, run_id, "dedupe", rows)
+        logger.info("dedupe: %d -> %d Postings", len(state["postings"]), len(deduped))
         return {"postings": deduped}
 
     def staleness(state: PollState) -> dict:
@@ -187,19 +291,30 @@ def build_poll_graph(
 
         def _run_knockout() -> list[dict]:
             updated = []
-            for posting in state["postings"]:
+            total = len(state["postings"])
+            for i, posting in enumerate(state["postings"], 1):
+                logger.info(
+                    "knockout %d/%d: %s — %s",
+                    i,
+                    total,
+                    posting.get("company", "?"),
+                    posting.get("title", posting.get("id", "?")),
+                )
                 # §17 / unit 30: with_retry only absorbs a 429 WITHIN this
                 # one call (intra-call backoff). A failure surviving that
                 # bumps app_posting.error_count, a SEPARATE cross-Poll
                 # counter (3 in a row -> dead) — not the same "3".
                 try:
-                    facts = with_retry(extract_knockout_facts, posting["jd_text"], rules)
+                    facts = with_retry(
+                        extract_knockout_facts, posting["jd_text"], rules, posting.get("city")
+                    )
                 except Exception as exc:
                     row = conn.execute(
                         "SELECT error_count FROM app_posting WHERE id = ?", (posting["id"],)
                     ).fetchone()
                     new_count = (row["error_count"] if row else 0) + 1
                     status = "dead" if new_count >= 3 else "error"
+                    logger.warning("knockout %d/%d: %s (error_count=%d)", i, total, exc, new_count)
                     updated.append(
                         {
                             **posting,

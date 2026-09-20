@@ -48,3 +48,27 @@ def test_extract_knockout_facts_calls_structured_llm(monkeypatch):
     assert captured["schema"] is KnockoutFacts
     assert "seniority_band" in captured["prompt"]
     assert "Senior Engineer role" in captured["prompt"]
+
+
+def test_extract_knockout_facts_includes_city_the_jd_text_is_silent_on(monkeypatch):
+    """Confirmed live: a real JD's prose never mentioned its office city at
+    all (location lived only in the job board's own metadata) — the
+    location axis needs `city` passed in explicitly or it has nothing to
+    check and defaults to passing."""
+    rules = [KnockoutRule(axis="location", rule="Germany-based only")]
+    captured = {}
+
+    class _FakeStructuredLLM:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return KnockoutFacts(axes=[AxisFact(axis="location", passes=False, evidence="Madrid")])
+
+    class _FakeLLM:
+        def with_structured_output(self, schema):
+            return _FakeStructuredLLM()
+
+    monkeypatch.setattr("jobscout.knockout.get_llm", lambda: _FakeLLM())
+
+    extract_knockout_facts("A JD with no location mentioned anywhere.", rules, city="Madrid, Spain")
+
+    assert "Madrid, Spain" in captured["prompt"]

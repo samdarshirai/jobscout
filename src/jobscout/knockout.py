@@ -25,18 +25,35 @@ class KnockoutFacts(BaseModel):
 
 
 _KNOCKOUT_PROMPT = (
-    "For each Knockout axis below, read the Job Description and decide whether "
-    "the JD satisfies that axis's rule. A JD silent on an axis passes it — only "
-    "mark passes=false when the JD actively conflicts with the rule.\n\n"
-    "Knockout axes:\n{axes}\n\nJob Description:\n{jd_text}"
+    "For each Knockout axis below, read the job board's location field and the "
+    "Job Description, and decide whether the JD satisfies that axis's rule. A JD "
+    "silent on an axis passes it — only mark passes=false when the JD or the "
+    "location field actively conflicts with the rule.\n\n"
+    "For an axis about the role's SCOPE or SENIORITY (e.g. \"frontend engineering "
+    "scope\"), judge it from what the JD actually describes the role as being about "
+    "— its title, responsibilities, and day-to-day work — not from an isolated "
+    "keyword that happens to appear elsewhere, like a stack term buried in an "
+    "unrelated tools/systems list on an otherwise non-engineering role.\n\n"
+    "Knockout axes:\n{axes}\n\nJob board location field: {city}\n\n"
+    "Job Description:\n{jd_text}"
 )
 
 
-def extract_knockout_facts(jd_text: str, rules: list[KnockoutRule]) -> KnockoutFacts:
-    """One structured LLM call (DESIGN §4: LLM calls only at named nodes)."""
+def extract_knockout_facts(
+    jd_text: str, rules: list[KnockoutRule], city: str | None = None
+) -> KnockoutFacts:
+    """One structured LLM call (DESIGN §4: LLM calls only at named nodes).
+
+    `city` is the job board's own structured location field, not part of
+    jd_text — confirmed live: a JD's prose can be entirely silent on
+    location (relying on the board's metadata instead), so the location
+    axis needs this passed in explicitly or it has nothing to check
+    against and defaults to passing."""
     axes_text = "\n".join(f"- {r.axis}: {r.rule}" for r in rules)
     structured_llm = get_llm().with_structured_output(KnockoutFacts)
-    return structured_llm.invoke(_KNOCKOUT_PROMPT.format(axes=axes_text, jd_text=jd_text))
+    return structured_llm.invoke(
+        _KNOCKOUT_PROMPT.format(axes=axes_text, city=city or "not given", jd_text=jd_text)
+    )
 
 
 def decide_knockout(facts: KnockoutFacts) -> str | None:

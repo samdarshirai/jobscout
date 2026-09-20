@@ -1,9 +1,12 @@
 from jobscout.discovery.companies import TargetCompany
 from jobscout.score import (
     DimensionScore,
+    ScoreResult,
     _cap_uncited,
     _company_lookup_text,
+    _fill_missing_dimensions,
     _past_rejections_text,
+    score_posting,
     score_postings,
     weighted_total,
 )
@@ -16,26 +19,99 @@ _SCORED = [
 
 def test_cap_uncited_leaves_a_well_cited_score_alone():
     dims = [DimensionScore(dimension="stack fit", score=5, jd_line="React", resume_line="Built with React")]
-    capped = _cap_uncited(dims, jd_text="Role needs React", resume_text="Built with React for 5 years")
+    capped, notes = _cap_uncited(dims, jd_text="Role needs React", resume_text="Built with React for 5 years")
     assert capped[0].score == 5
+    assert notes == []
 
 
 def test_cap_uncited_caps_a_score_missing_a_real_quote():
     dims = [DimensionScore(dimension="stack fit", score=5, jd_line="Rust", resume_line=None)]
-    capped = _cap_uncited(dims, jd_text="Role needs Rust", resume_text="Built with React")
+    capped, notes = _cap_uncited(dims, jd_text="Role needs Rust", resume_text="Built with React")
     assert capped[0].score == 2
+    assert "stack fit" in notes[0]
 
 
 def test_cap_uncited_catches_a_fabricated_quote_not_actually_in_the_text():
     dims = [DimensionScore(dimension="stack fit", score=5, jd_line="Rust", resume_line="Shipped Rust for 5 years")]
-    capped = _cap_uncited(dims, jd_text="Role needs Rust", resume_text="Built with React, no Rust here")
+    capped, notes = _cap_uncited(dims, jd_text="Role needs Rust", resume_text="Built with React, no Rust here")
     assert capped[0].score == 2
+    assert notes
 
 
 def test_cap_uncited_leaves_a_low_uncited_score_alone():
     dims = [DimensionScore(dimension="stack fit", score=1, jd_line=None, resume_line=None)]
-    capped = _cap_uncited(dims, jd_text="Role needs Rust", resume_text="Built with React")
+    capped, notes = _cap_uncited(dims, jd_text="Role needs Rust", resume_text="Built with React")
     assert capped[0].score == 1
+    assert notes == []
+
+
+def test_cap_uncited_caps_two_real_but_unrelated_quotes():
+    """Confirmed live (unit 35): two independently-real quotes aren't
+    necessarily related to each other."""
+    dims = [DimensionScore(
+        dimension="domain/product interest", score=5,
+        jd_line="We build AI voice agents for scheduling appointments.",
+        resume_line="Developed high-performance Angular applications serving 100,000+ users.",
+    )]
+    capped, notes = _cap_uncited(
+        dims,
+        jd_text="We build AI voice agents for scheduling appointments.",
+        resume_text="Developed high-performance Angular applications serving 100,000+ users.",
+    )
+    assert capped[0].score == 2
+    assert "don't relate" in notes[0]
+
+
+def test_cap_uncited_does_not_cap_related_quotes_with_different_word_forms():
+    """The stem check should survive plain inflection (mentor/mentored),
+    not just exact word matches."""
+    dims = [DimensionScore(
+        dimension="scope & seniority", score=5,
+        jd_line="Mentor engineers and lead platform initiatives.",
+        resume_line="Mentored developers and led a team of 4 engineers.",
+    )]
+    capped, notes = _cap_uncited(
+        dims,
+        jd_text="Mentor engineers and lead platform initiatives.",
+        resume_text="Mentored developers and led a team of 4 engineers.",
+    )
+    assert capped[0].score == 5
+    assert notes == []
+
+
+def test_score_posting_applies_the_cap_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jobscout.score._run_scoring_agent",
+        lambda jd_text, scored, tools: ScoreResult(
+            dimensions=[DimensionScore(dimension="stack fit", score=5, jd_line=None, resume_line=None)],
+            rationale="great fit",
+        ),
+    )
+    posting = {"id": "p1", "jd_text": "JD", "content_hash": None}
+
+    result = score_posting(posting, _SCORED, "resume", [], conn=None)
+
+    assert result["dimensions"][0]["score"] == 2
+    assert "capped" in result["rationale"]
+
+
+def test_score_posting_skips_the_cap_when_matched_lines_required_is_false(tmp_path, monkeypatch):
+    """Ablation switch (unit 37): MATCHED_LINES_REQUIRED=false measures
+    the anti-inflation cap's delta by turning it off."""
+    monkeypatch.setattr(
+        "jobscout.score._run_scoring_agent",
+        lambda jd_text, scored, tools: ScoreResult(
+            dimensions=[DimensionScore(dimension="stack fit", score=5, jd_line=None, resume_line=None)],
+            rationale="great fit",
+        ),
+    )
+    monkeypatch.setenv("MATCHED_LINES_REQUIRED", "false")
+    posting = {"id": "p1", "jd_text": "JD", "content_hash": None}
+
+    result = score_posting(posting, _SCORED, "resume", [], conn=None)
+
+    assert result["dimensions"][0]["score"] == 5
+    assert result["rationale"] == "great fit"
 
 
 def test_weighted_total_scales_to_0_100():
@@ -49,6 +125,83 @@ def test_weighted_total_scales_to_0_100():
 def test_weighted_total_ignores_a_dimension_not_in_criteria():
     dims = [DimensionScore(dimension="not a real axis", score=5)]
     assert weighted_total(dims, _SCORED) == 0
+
+
+def test_weighted_total_matches_a_dimension_name_regardless_of_formatting():
+    """Confirmed live: the model returned "stack_fit" for the criteria's
+    "stack fit" — an exact-string match zeroed that dimension's weight
+    silently, tanking a Posting narratively rationalized at ~92/100 down
+    to a stored 0."""
+    dims = [
+        DimensionScore(dimension="Stack_Fit", score=5, jd_line="x", resume_line="y"),
+        DimensionScore(dimension="ENG-CULTURE SIGNALS", score=0),
+    ]
+    assert weighted_total(dims, _SCORED) == 60
+
+
+def test_fill_missing_dimensions_adds_an_uncited_0_for_a_dimension_the_model_skipped():
+    """Confirmed live: a real Posting's model call returned only 1 of 4
+    scored dimensions; the other 3 silently contributed 0 weight with no
+    record they were ever missing. An explicit, uncited 0 stub makes the
+    gap visible instead of an invisible side effect of a weight lookup
+    finding nothing."""
+    dims = [DimensionScore(dimension="stack fit", score=2, jd_line="x", resume_line="y")]
+    filled = _fill_missing_dimensions(dims, _SCORED)
+    assert len(filled) == 2
+    missing = next(d for d in filled if d.dimension == "eng-culture signals")
+    assert missing.score == 0
+    assert missing.jd_line is None
+    assert missing.resume_line is None
+
+
+def test_fill_missing_dimensions_adds_nothing_when_every_dimension_is_present():
+    dims = [
+        DimensionScore(dimension="stack fit", score=2, jd_line="x", resume_line="y"),
+        DimensionScore(dimension="eng-culture signals", score=3, jd_line="x", resume_line="y"),
+    ]
+    filled = _fill_missing_dimensions(dims, _SCORED)
+    assert len(filled) == 2
+
+
+def test_fill_missing_dimensions_matches_a_reformatted_name_and_does_not_duplicate():
+    """A dimension name the model reformats (underscores, dropped words)
+    must still count as present — otherwise this fix would double-count
+    it instead of the weight-matching bug it's meant to complement."""
+    dims = [DimensionScore(dimension="stack_fit", score=2, jd_line="x", resume_line="y")]
+    filled = _fill_missing_dimensions(dims, _SCORED)
+    assert len(filled) == 2  # stack_fit matched, only eng-culture signals added
+
+
+def test_weighted_total_matches_a_dimension_name_missing_a_word():
+    """Confirmed live: even after case/punctuation normalization, the
+    model's "scope_seniority" didn't match the criteria's real
+    "scope & seniority signals" — it dropped the word "signals"
+    entirely, not just reformatted it — silently zeroing that
+    dimension's weight (22 stored instead of the correct 40 for a
+    Posting whose dims were uniformly 2/5). Fuzzy word-overlap matching
+    survives a dropped word, not just reformatting."""
+    scored = [
+        {"dimension": "scope & seniority signals", "weight": 0.6, "rubric": "x"},
+        {"dimension": "eng-culture signals", "weight": 0.4, "rubric": "x"},
+    ]
+    dims = [
+        DimensionScore(dimension="scope_seniority", score=5, jd_line="x", resume_line="y"),
+        DimensionScore(dimension="eng_culture", score=0),
+    ]
+    assert weighted_total(dims, scored) == 60
+
+
+def test_weighted_total_averages_duplicate_entries_for_the_same_dimension():
+    """Confirmed live: the model can cite the same dimension twice (two
+    separate JD/resume line pairs) — each entry must not count as a
+    separate dimension's worth of weight, or the total gets inflated."""
+    dims = [
+        DimensionScore(dimension="stack fit", score=5, jd_line="x", resume_line="y"),
+        DimensionScore(dimension="stack fit", score=5, jd_line="x2", resume_line="y2"),
+        DimensionScore(dimension="eng-culture signals", score=0),
+    ]
+    # same as a single stack-fit=5, eng-culture=0 — NOT double-counted to 120
+    assert weighted_total(dims, _SCORED) == 60
 
 
 def test_company_lookup_text_reports_unknown_company():

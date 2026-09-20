@@ -26,24 +26,50 @@ class FaithfulnessReport(BaseModel):
 
 _FAITHFULNESS_PROMPT = (
     "Break this Cover Letter into its individual factual claims about the "
-    "candidate's skills, experience, or background. Ignore generic "
-    "pleasantries or closing lines that assert nothing factual (e.g. "
-    "\"I'm excited about this opportunity\" is not a claim; \"I led a team "
-    "of 5 engineers\" is).\n\n"
-    "For each claim, judge strictly whether the Resume below directly "
-    "supports it — quote the exact resume line when it does. A claim only "
-    "loosely implied, or that extrapolates beyond what the resume actually "
-    "says, is NOT traceable.\n\n"
-    "Cover Letter:\n{letter_body}\n\nResume:\n{resume_text}"
+    "candidate's skills, experience, or background — a claim is a concrete, "
+    "checkable assertion (\"I led a team of 5 engineers\"). NONE of the "
+    "following are claims, do not extract them:\n"
+    "- a pleasantry, greeting, or closing line (\"I'm excited about this "
+    "opportunity\", \"I'd welcome the chance to discuss further\")\n"
+    "- a statement about the COMPANY, role, or mission, not the candidate's "
+    "own background (\"your mission resonates with me\")\n"
+    "- a self-assessment, opinion, or admitted gap about the candidate "
+    "(\"Java is not my strongest area\", \"I have a system-design mindset\", "
+    "\"I can contribute while growing into it\")\n"
+    "- a forward-looking intention (\"I'd welcome the chance...\")\n\n"
+    "Extract claims at the sentence or clause level — a sentence naming "
+    "several resume-backed tools or projects together is ONE claim, not "
+    "one per tool. Under-counting a compound sentence as one claim is fine; "
+    "splitting it into five is not.\n\n"
+    "For each real claim, judge whether the Resume OR the Profile below "
+    "supports its SUBSTANCE — a different phrasing, tense, or combining "
+    "two lines into one sentence still counts as traceable. A claim about "
+    "language level, location preference, or work authorization only the "
+    "Profile would state (not a resume section) is traceable if the "
+    "Profile supports it. Only mark untraceable when neither the Resume "
+    "nor the Profile supports what the letter asserts, or one of them "
+    "meaningfully contradicts it. Quote the exact supporting line when it "
+    "does support the claim.\n\n"
+    "Cover Letter:\n{letter_body}\n\nResume:\n{resume_text}\n\nProfile:\n{profile}"
 )
 
 
-def check_faithfulness(letter_body: str, resume_text: str) -> FaithfulnessReport:
+def check_faithfulness(letter_body: str, resume_text: str, profile: dict | None = None) -> FaithfulnessReport:
     """One structured LLM call (DESIGN §4) — an LLM-judge critic, not a
-    ReAct agent."""
+    ReAct agent.
+
+    Confirmed live (unit 37 ablation): draft_letter is given BOTH resume
+    and profile (language level, location preference, work authorization
+    aren't resume content), but check_faithfulness only ever saw the
+    resume — every legitimate profile-sourced claim in a real letter came
+    back "untraceable" purely because the checker never had the data to
+    trace it against. `profile` is optional (default None -> "n/a") so
+    existing calls don't break."""
     structured_llm = get_llm().with_structured_output(FaithfulnessReport)
     return structured_llm.invoke(
-        _FAITHFULNESS_PROMPT.format(letter_body=letter_body, resume_text=resume_text)
+        _FAITHFULNESS_PROMPT.format(
+            letter_body=letter_body, resume_text=resume_text, profile=profile or "n/a"
+        )
     )
 
 

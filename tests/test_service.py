@@ -144,7 +144,7 @@ def test_resume_run_approve_persists_discovered_postings(tmp_path, monkeypatch):
     monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
-        lambda jd_text, rules: KnockoutFacts(
+        lambda jd_text, rules, city=None: KnockoutFacts(
             axes=[AxisFact(axis="seniority_band", passes=True, evidence="Engineer")]
         ),
     )
@@ -189,7 +189,7 @@ def test_resume_run_approve_resets_missed_polls_on_a_reappearing_posting(tmp_pat
     monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
-        lambda jd_text, rules: KnockoutFacts(
+        lambda jd_text, rules, city=None: KnockoutFacts(
             axes=[AxisFact(axis="seniority_band", passes=True, evidence="Engineer")]
         ),
     )
@@ -238,7 +238,7 @@ def test_resume_run_approve_persists_a_score(tmp_path, monkeypatch):
     monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
-        lambda jd_text, rules: KnockoutFacts(
+        lambda jd_text, rules, city=None: KnockoutFacts(
             axes=[AxisFact(axis="seniority_band", passes=True, evidence="Engineer")]
         ),
     )
@@ -287,7 +287,7 @@ def test_resume_run_approve_persists_a_knockout_exclusion(tmp_path, monkeypatch)
     monkeypatch.setattr("jobscout.graph.poll.discover_arbeitnow", lambda client: [])
     monkeypatch.setattr(
         "jobscout.graph.poll.extract_knockout_facts",
-        lambda jd_text, rules: KnockoutFacts(
+        lambda jd_text, rules, city=None: KnockoutFacts(
             axes=[AxisFact(axis="seniority_band", passes=False, evidence="Junior role")]
         ),
     )
@@ -381,7 +381,7 @@ def test_resume_letter_approve_runs_faithfulness_then_completes(tmp_path, monkey
     )
     monkeypatch.setattr(
         "jobscout.graph.letter.check_faithfulness",
-        lambda letter_body, resume_text: type(
+        lambda letter_body, resume_text, profile: type(
             "F", (), {"model_dump": lambda self: {"claims": []}}
         )(),
     )
@@ -451,7 +451,8 @@ def test_record_verdict_rejects_unknown_verdict(tmp_path):
 
 def _seed_posting_and_score(svc, posting_id, company, title, score, run_id="r1"):
     svc._conn.execute(
-        "INSERT INTO app_posting (id, source, company, title) VALUES (?, 'arbeitnow', ?, ?)",
+        "INSERT INTO app_posting (id, source, company, title, status) "
+        "VALUES (?, 'arbeitnow', ?, ?, 'scored')",
         (posting_id, company, title),
     )
     svc._conn.execute(

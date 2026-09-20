@@ -2,4 +2,90 @@
 # candidate would actually work for (DESIGN §3). ATS type is
 # auto-detected from `slug`, cached, not listed here. `careers_url` is
 # only used as the `trafilatura` fallback when no ATS is detected.
-companies: []
+#
+# Slugs below are best-effort guesses (company name, common casing
+# conventions) — auto-detection probes greenhouse/lever/ashby/personio
+# per slug and caches "none" harmlessly on a miss, so a wrong guess costs
+# nothing beyond a few extra HTTP probes on first Poll.
+companies:
+  - name: Personio
+    slug: personio
+    careers_url: https://www.personio.com/career/
+  - name: Celonis
+    slug: celonis
+    careers_url: https://www.celonis.com/careers/
+  - name: Camunda
+    slug: camunda
+    careers_url: https://camunda.com/careers/
+  - name: LeanIX
+    slug: leanix
+    careers_url: https://www.sap.com/leanix/company/careers.html
+  - name: Staffbase
+    slug: staffbase
+    careers_url: https://staffbase.com/en/careers/
+  - name: Cognigy
+    slug: cognigy
+    careers_url: https://www.cognigy.com/careers
+  - name: Jedox
+    slug: jedox
+    careers_url: https://www.jedox.com/en/company/karriere/
+  - name: Raisin
+    slug: raisin
+    careers_url: https://www.raisin.com/careers/
+  - name: Auxmoney
+    slug: auxmoney
+    careers_url: https://www.auxmoney.com/karriere/
+  - name: Scalable Capital
+    slug: scalablecapital
+    careers_url: https://scalable.capital/en/careers
+  - name: Solarisbank
+    slug: solarisbank
+    careers_url: https://www.solarisgroup.com/en/careers/
+  - name: Mambu
+    slug: mambu
+    careers_url: https://mambu.com/careers
+  - name: AUTO1 Group
+    slug: auto1
+    careers_url: https://www.auto1-group.com/karriere/
+  - name: CHECK24
+    slug: check24
+    careers_url: https://jobs.check24.de/
+  - name: FlixBus
+    slug: flixbus
+    careers_url: https://careers.flixbus.com/
+  - name: HomeToGo
+    slug: hometogo
+    careers_url: https://www.hometogo.com/careers/
+  - name: Omio
+    slug: omio
+    careers_url: https://www.omio.com/careers
+  - name: GetYourGuide
+    slug: getyourguide
+    careers_url: https://careers.getyourguide.com/
+  - name: Westwing
+    slug: westwing
+    careers_url: https://www.westwing.com/career/
+  - name: ImmoScout24
+    slug: immobilienscout24
+    careers_url: https://karriere.immobilienscout24.de/
+  - name: MaibornWolff
+    slug: maibornwolff
+    careers_url: https://www.maibornwolff.de/en/career
+  - name: codecentric
+    slug: codecentric
+    careers_url: https://www.codecentric.de/karriere
+  - name: inovex
+    slug: inovex
+    careers_url: https://www.inovex.de/en/career/
+  - name: TNG Technology Consulting
+    slug: tngtech
+    careers_url: https://www.tngtech.com/en/career.html
+  - name: remberg
+    slug: remberg
+    careers_url: https://www.remberg.com/en/career
+  - name: Quantum Systems
+    slug: quantum-systems
+    careers_url: https://career.quantum-systems.com/
+  - name: neoshare
+    slug: neoshare
+    careers_url: https://neoshare.jobs.personio.de/

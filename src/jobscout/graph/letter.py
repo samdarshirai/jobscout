@@ -63,7 +63,7 @@ def build_letter_graph(conn: sqlite3.Connection) -> StateGraph:
     def faithfulness(state: LetterState, config: RunnableConfig) -> dict:
         run_id = config["configurable"]["thread_id"]
         result, rows = spend.run_and_track(
-            check_faithfulness, state["draft"]["body"], state["resume_text"]
+            check_faithfulness, state["draft"]["body"], state["resume_text"], state["profile"]
         )
         spend.log_spend(conn, run_id, "check_faithfulness", rows)
         return {"faithfulness": result.model_dump()}

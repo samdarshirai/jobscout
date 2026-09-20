@@ -36,8 +36,32 @@ def test_model_pricing_returns_zero_on_network_error(monkeypatch):
         raise httpx.HTTPError("no network")
 
     monkeypatch.setattr("jobscout.spend.httpx.get", _boom)
-    _model_pricing.cache_clear()
+    monkeypatch.setattr("jobscout.spend._pricing_cache", {})
     assert _model_pricing("some/model") == (0.0, 0.0)
+
+
+def test_model_pricing_does_not_cache_a_network_failure(monkeypatch):
+    """Confirmed live: caching the (0.0, 0.0) fallback let one transient
+    network error zero every Spend row for the rest of the process. A
+    failure must be retried on the next call, not remembered forever."""
+    import jobscout.spend as spend_module
+
+    calls = {"n": 0}
+
+    def _flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.HTTPError("transient")
+        req = httpx.Request("GET", "https://example.test/models")
+        return httpx.Response(
+            200, json={"data": [{"id": "m", "pricing": {"prompt": "0.001", "completion": "0.002"}}]}, request=req
+        )
+
+    monkeypatch.setattr("jobscout.spend.httpx.get", _flaky)
+    monkeypatch.setattr(spend_module, "_pricing_cache", {})
+
+    assert _model_pricing("m") == (0.0, 0.0)  # first call: transient failure, not cached
+    assert _model_pricing("m") == (0.001, 0.002)  # second call: retried, succeeds
 
 
 def test_cost_for_multiplies_tokens_by_rate(monkeypatch):

@@ -360,13 +360,18 @@ class CoreService:
 
     # ---- queue ----------------------------------------------------------
     def get_queue(self) -> list[QueueEntry]:
-        """Every Posting passing its Knockouts, sorted by Score (§6). A
-        Posting the Knockout node excluded never got a Score, so the join
-        alone leaves it out — nothing here is ever auto-dropped, and a
-        rescored Posting shows only its latest Score, not one row per Run.
-        `changed` flags a Posting scored more than once — a proxy for "the
-        JD changed since she first saw it" (§11 unit 20); there's no
-        separate "when did she look at this" tracking in this data model."""
+        """Every Posting *currently* passing its Knockouts, sorted by Score
+        (§6). A Posting the Knockout node excluded never got a Score, so
+        the join alone leaves it out on its first Run — but a Posting can
+        be re-discovered in a later Poll and knocked out THEN (confirmed
+        live: a Criteria/prompt fix started correctly excluding Postings
+        that a past Run had scored), so `p.status = 'scored'` is required
+        too — an old app_score row from before that must not keep a now-
+        excluded Posting in the Queue. A rescored Posting shows only its
+        latest Score, not one row per Run. `changed` flags a Posting
+        scored more than once — a proxy for "the JD changed since she
+        first saw it" (§11 unit 20); there's no separate "when did she
+        look at this" tracking in this data model."""
         rows = self._conn.execute(
             "SELECT p.id, p.company, p.title, p.city, p.url, "
             "s.score, s.rationale, s.dimensions_json, "
@@ -374,6 +379,7 @@ class CoreService:
             "FROM app_posting p "
             "JOIN app_score s ON s.id = "
             "  (SELECT MAX(id) FROM app_score WHERE posting_id = p.id) "
+            "WHERE p.status = 'scored' "
             "ORDER BY s.score DESC"
         ).fetchall()
         return [

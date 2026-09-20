@@ -14,7 +14,6 @@ nothing tests call-level granularity, and this keeps every LLM-calling
 node's wiring identical.
 """
 
-from functools import lru_cache
 from typing import Any, Callable
 
 import httpx
@@ -29,7 +28,9 @@ class SpendCapExceeded(RuntimeError):
     pass
 
 
-@lru_cache(maxsize=None)
+_pricing_cache: dict[str, tuple[float, float]] = {}
+
+
 def _model_pricing(model: str) -> tuple[float, float]:
     """(prompt $/token, completion $/token) from OpenRouter's live
     catalogue — never a rate baked into code (unit8-spend-pricing-note:
@@ -40,14 +41,25 @@ def _model_pricing(model: str) -> tuple[float, float]:
     instead, but `get_usage_metadata_callback`'s standardized UsageMetadata
     doesn't carry it, so this live-fetched base rate is the deliberate
     fallback, not an oversight. Falls back to (0.0, 0.0) if the catalogue
-    is unreachable — a $0 Spend row beats crashing the Run over pricing."""
+    is unreachable — a $0 Spend row beats crashing the Run over pricing.
+
+    Only a SUCCESSFUL lookup is cached — confirmed live: with `lru_cache`
+    on this whole function, one transient network failure early in a
+    process permanently memoized (0.0, 0.0) for that model, silently
+    zeroing every Spend row for the rest of the process (22 real Score
+    calls logged $0 total from a single early hiccup). A fallback must
+    be retried next call, not remembered forever."""
+    if model in _pricing_cache:
+        return _pricing_cache[model]
     try:
         resp = httpx.get(f"{DEFAULT_BASE_URL}/models", timeout=5.0)
         resp.raise_for_status()
         for entry in resp.json().get("data", []):
             if entry.get("id") == model:
                 pricing = entry.get("pricing", {})
-                return float(pricing.get("prompt", 0.0)), float(pricing.get("completion", 0.0))
+                rates = (float(pricing.get("prompt", 0.0)), float(pricing.get("completion", 0.0)))
+                _pricing_cache[model] = rates
+                return rates
     except httpx.HTTPError:
         pass
     return 0.0, 0.0

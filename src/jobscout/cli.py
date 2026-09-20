@@ -1,12 +1,23 @@
+import logging
 from pathlib import Path
 
 import typer
 import yaml
 from rich.console import Console
+from rich.logging import RichHandler
 from rich.table import Table
 
 from jobscout import __version__, spend
 from jobscout.service import get_service
+
+# Per-Posting progress (discover/dedupe/knockout/score counts, DESIGN §17)
+# is INFO-level and otherwise invisible — stdlib logging defaults to
+# WARNING+, and a Poll's knockout/score loops can run for minutes with no
+# other sign of life. Confirmed live: without this, a slow real Poll looks
+# indistinguishable from a hang.
+logging.basicConfig(
+    level=logging.INFO, format="%(message)s", handlers=[RichHandler(show_path=False)]
+)
 
 app = typer.Typer(
     name="jobscout",

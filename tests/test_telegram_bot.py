@@ -149,8 +149,11 @@ def _query(chat_id, data):
     )
 
 
-def _context(allowed_chat_ids, service):
-    return SimpleNamespace(bot_data={"allowed_chat_ids": allowed_chat_ids, "service": service})
+def _context(allowed_chat_ids, service, bot=None, job_queue=None):
+    return SimpleNamespace(
+        bot_data={"allowed_chat_ids": allowed_chat_ids, "service": service},
+        bot=bot, job_queue=job_queue,
+    )
 
 
 @pytest.mark.asyncio
@@ -230,6 +233,52 @@ async def test_handle_gate_button_reject_routes_scope_expansion_to_its_own_resum
     await handle_gate_button(update, _context({42}, svc))
 
     assert calls == [("run-2", "reject")]
+
+
+@pytest.mark.asyncio
+async def test_handle_gate_button_search_plan_completed_sends_poll_notification():
+    handle = SimpleNamespace(
+        status="completed", run_id="run-1", pending_gate=None,
+        state={"postings": [{"id": "p1", "status": "scored", "company": "Acme", "title": "Eng", "score": 80}]},
+    )
+    svc = SimpleNamespace(resume_run=lambda run_id, decision: handle)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    query = _query(chat_id=42, data="gate:approve:search_plan:run-1")
+    update = SimpleNamespace(callback_query=query)
+
+    await handle_gate_button(update, _context({42}, svc, bot=bot))
+
+    assert bot.send_message.await_count == 2  # summary + one posting
+
+
+@pytest.mark.asyncio
+async def test_handle_gate_button_search_plan_paused_again_sends_next_gate():
+    handle = SimpleNamespace(
+        status="paused", run_id="run-1",
+        pending_gate={"gate": "outbound_letter", "draft": {"body": "hi"}},
+        state={},
+    )
+    svc = SimpleNamespace(resume_run=lambda run_id, decision: handle)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    query = _query(chat_id=42, data="gate:approve:search_plan:run-1")
+    update = SimpleNamespace(callback_query=query)
+
+    await handle_gate_button(update, _context({42}, svc, bot=bot))
+
+    bot.send_message.assert_awaited_once()
+    assert "Cover Letter" in bot.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_handle_gate_button_letter_gate_sends_no_follow_up():
+    svc = SimpleNamespace(resume_letter=lambda run_id, decision: SimpleNamespace(status="completed"))
+    bot = SimpleNamespace(send_message=AsyncMock())
+    query = _query(chat_id=42, data="gate:approve:outbound_letter:run-1")
+    update = SimpleNamespace(callback_query=query)
+
+    await handle_gate_button(update, _context({42}, svc, bot=bot))
+
+    bot.send_message.assert_not_awaited()
 
 
 # ---- notification sending -------------------------------------------------

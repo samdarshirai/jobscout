@@ -8,6 +8,7 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from jobscout import __version__, spend
+from jobscout.serve import main as serve_main
 from jobscout.service import get_service
 
 # Per-Posting progress (discover/dedupe/knockout/score counts, DESIGN §17)
@@ -218,6 +219,12 @@ def rescore() -> None:
     except spend.SpendCapExceeded as e:
         _fail(str(e))
     console.print(f"[green]Rescored {count} Posting(s).[/green]")
+
+
+@app.command()
+def serve() -> None:
+    """Telegram bot + web app + twice-daily Poll, one long-running process (DESIGN §16)."""
+    serve_main()
 
 
 def run() -> None:

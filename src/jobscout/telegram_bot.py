@@ -155,9 +155,23 @@ async def handle_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     decision = "approve" if action == "approve" else "reject"
     svc: CoreService = context.bot_data["service"]
     resume = getattr(svc, _RESUME_METHOD_BY_GATE[gate])
-    resume(run_id, decision)
+    handle = resume(run_id, decision)
     await query.answer(decision.capitalize())
     await query.edit_message_reply_markup(reply_markup=None)
+    # Only the search_plan gate has anything left to tell her about after it
+    # resumes -- resuming it runs the rest of the Poll (discover/dedupe/
+    # knockout/score), which either hits ANOTHER gate or produces a fresh
+    # Queue she hasn't heard about yet. The letter/scope-expansion gates'
+    # resume is terminal from her side (a drafted letter or an applied
+    # Criteria change), nothing further to push.
+    if gate == "search_plan" and handle is not None:
+        chat_ids = list(context.bot_data["allowed_chat_ids"])
+        if handle.status == "paused" and handle.pending_gate:
+            await send_gate_prompt(context.bot, chat_ids, handle.run_id, handle.pending_gate)
+        else:
+            await send_poll_notification(
+                context.bot, context.job_queue, chat_ids, handle.state.get("postings", [])
+            )
 
 
 async def send_gate_prompt(bot, chat_ids: list[int], run_id: str, pending_gate: dict) -> None:

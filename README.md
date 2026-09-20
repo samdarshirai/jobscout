@@ -60,10 +60,10 @@ uv run uvicorn jobscout.web:app --reload
 Everything the web UI does routes through the same `CoreService` as the CLI — a Verdict
 recorded from the browser is the same call `jobscout thumb` makes.
 
-The Telegram surface (`src/jobscout/telegram_bot.py`) is built and unit-tested
-(`tests/test_telegram_bot.py`) but not yet wired to a standalone launch command — start it by
-calling `build_application(...)` and `.run_polling()` yourself with a bot token, or wait for the
-`jobscout serve` wiring noted as a deliberate follow-up in the build plan.
+## Deploy — connect Telegram, run continuously
+
+`jobscout serve` (DESIGN §16) runs the Telegram bot, the web app, and a twice-daily Poll in one
+long-running process. Full walkthrough (bot token, chat ids, `launchd`): [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Tests
 
